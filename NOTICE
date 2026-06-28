@@ -1,0 +1,57 @@
+IV-Code-Defender
+Copyright 2026 Anthropic PBC
+Government-use addendum © 2025-2026 ivproduced (euCann)
+
+This product is licensed under the Apache License, Version 2.0. A copy of the
+license is included in the LICENSE file.
+
+================================================================================
+GOVERNMENT USE RIGHTS & PUBLIC SECTOR LICENSE ADDENDUM
+================================================================================
+
+This section applies to use by any government entity — U.S. Federal, state,
+local, tribal, and territorial (SLTT) governments and equivalents.
+
+1. FREE FOR GOVERNMENT USE
+
+   Free of charge for all government use, in perpetuity: federal civilian
+   agencies, Department of Defense and intelligence community, SLTT
+   governments, government contractors acting on a government's behalf,
+   FFRDCs, and UARCs. No additional license, subscription, or fee required.
+
+2. FAR/DFARS COMPLIANCE
+
+   This software is "commercial computer software" (FAR 2.101, DFARS
+   252.227-7014). Government rights are defined by Apache 2.0, consistent with
+   FAR 52.227-14(b)(3) and DFARS 252.227-7015. No additional government purpose
+   rights are needed.
+
+3. FEDRAMP & COMPLIANCE
+
+   - Findings carry NIST SP 800-53 Rev 5 control mappings; `vuln-pipeline
+     oscal` emits an OSCAL assessment-results document for FedRAMP tooling.
+   - The autonomous agent fleet runs inside gVisor containers on an egress-only
+     network; the only outbound path is the configured model endpoint
+     (api.anthropic.com, Bedrock, or Vertex) via an allowlist proxy.
+   - Cloud provider modes require boundary analysis by the authorizing official
+     before use in FedRAMP-authorized systems.
+
+4. NO TELEMETRY GUARANTEE
+
+   Zero telemetry, zero analytics, zero phone-home. The only network calls are
+   to the explicitly configured AI provider endpoint.
+
+5. EXPORT CONTROL NOTICE
+
+   Publicly available open source software, not subject to U.S. export controls
+   under EAR 15 CFR § 734.7 and § 742.15(b).
+
+================================================================================
+AI MODEL NOTICE
+================================================================================
+
+The agent fleet runs on Anthropic Claude via the Anthropic API, Amazon Bedrock,
+or Google Vertex. Models are NOT included in or covered by this license; users
+must comply with their chosen provider's terms of service. OpenAI, Azure
+OpenAI, and Ollama are reserved for a future non-agent static pass and cannot
+host the fleet.
