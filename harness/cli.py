@@ -40,7 +40,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import docker_ops, providers, sandbox
+from . import docker_ops, providers, sandbox, compliance
 from .agent import color
 from .artifacts import CrashArtifact, RunResult
 from .asan import asan_excerpt, crash_reason, top_frame
@@ -945,6 +945,13 @@ def main() -> int:
     p_patch.add_argument("--engagement-context", type=Path, default=None,
                          help="Path to an authorization/engagement-scope file (see `run --help`)")
 
+    p_oscal = sub.add_parser("oscal",
+                             help="Export NIST 800-53 / OSCAL assessment-results JSON from reports")
+    p_oscal.add_argument("results_dir", type=Path,
+                         help="Batch directory containing reports/bug_*/report.json")
+    p_oscal.add_argument("-o", "--out", type=Path, default=None,
+                         help="Output path (default: <results_dir>/oscal.json)")
+
     args = parser.parse_args()
 
     if args.command in ("run", "recon", "report", "patch"):
@@ -962,6 +969,13 @@ def main() -> int:
         return _cmd_report(args)
     if args.command == "patch":
         return _cmd_patch(args)
+    if args.command == "oscal":
+        out = args.out or (args.results_dir / "oscal.json")
+        doc = compliance.build_oscal(args.results_dir)
+        n = len(doc["assessment-results"]["results"][0]["findings"])
+        out.write_text(json.dumps(doc, indent=2))
+        print(f"  {n} finding(s) → {out}")
+        return 0
     return 1
 
 
@@ -1195,6 +1209,8 @@ async def _report_one(
 
 
 def _write_report_json(out_dir: Path, d: dict) -> None:
+    if d.get("signature"):
+        compliance.enrich(d)
     with open(out_dir / "report.json", "w") as f:
         json.dump(d, f, indent=2)
 
