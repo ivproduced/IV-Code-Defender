@@ -21,6 +21,7 @@ allowed-tools:
   - Bash(wc:*)
   - Bash(head:*)
   - Bash(file:*)
+  - Bash(python3:*)
 ---
 
 # /vuln-scan
@@ -172,51 +173,55 @@ single <finding> with category=none and a one-line note of what you covered.
    duplicate id. (Heavy dedupe is `/triage`'s job; don't over-engineer here.)
 3. Assign stable ids `F-001`, `F-002`, ... in (severity desc, file, line)
    order.
+4. Before scoring, write the unscored `VULN-FINDINGS.json` with the schema in
+   Step 4. This checkpoint preserves raw findings if a later scoring pass
+   exceeds context or fails.
 
 ## Step 3b — Confidence pass (skip if `--no-score`)
 
 A cheap second-opinion read that **ranks** findings by signal quality.
 **Nothing is dropped** — this pass calibrates `confidence` so humans and
-`/triage` see high-signal findings first. Spawn **one Task subagent per
-finding** in parallel with the brief below. Shallow: re-read and score, not
-a full reachability trace.
+`/triage` see high-signal findings first.
 
-### Scoring brief (per finding)
+Do not spawn one subagent per finding. On large finding sets that accumulates
+too many long responses in the main context. Split findings into batches of
+at most 10, spawn one scoring Task per batch, and cap concurrency at five
+batches. Each scorer returns a compact JSON array only.
+
+### Scoring brief (per batch)
 
 ```
-You are giving ONE candidate security finding an independent confidence
-score. You are NOT deciding whether to keep it — every finding is kept.
-You are deciding how likely it is to survive rigorous triage.
+You are scoring a batch of security findings. You are NOT dropping any
+finding. You are calibrating confidence so high-signal findings sort first.
 
-FINDING:
-{the full <finding> block}
+FINDINGS:
+{up to 10 full <finding> blocks}
 
 TARGET: {target_dir} (you may Read/Grep inside it; do NOT execute)
 
-STEP 1 — Re-read the cited code. Open {file} around line {line}. Does the
-code actually do what the description claims?
+For EACH finding:
+1. Re-read the cited code. Does it do what the description claims?
+2. Check for common false-positive patterns: volumetric DoS, memory-safe
+   language, test/fixture/doc file, framework auto-escape, env-var vector,
+   missing-hardening-only, regex/log injection, or outdated dependency.
+3. Score 1-10 that the finding is real and actionable:
+   - 1-3: likely false positive or noise
+   - 4-5: plausible but speculative
+   - 6-7: credible, needs investigation
+   - 8-10: high confidence, clear pattern
 
-STEP 2 — Check against common false-positive patterns (volumetric DoS,
-memory-safe language, test/fixture/doc file, framework auto-escape, env-var
-vector, missing-hardening-only, regex/log injection, outdated dep). A match
-lowers confidence sharply but does not auto-zero it.
-
-STEP 3 — Score 1-10 that this is a real, actionable vulnerability:
-  1-3  likely false positive or noise
-  4-5  plausible but speculative
-  6-7  credible, needs investigation
-  8-10 high confidence, clear pattern
-
-OUTPUT (exactly this, nothing else):
-  CONFIDENCE: <1-10>
-  REASON: <one line>
+OUTPUT: Return only a JSON array, no prose or Markdown fences:
+[
+  {"id": "F-001", "score": 9, "reason": "one line"},
+  {"id": "F-002", "score": 6, "reason": "one line"}
+]
 ```
 
-**Resolve:** overwrite each finding's `confidence` with the score
-(normalized to 0.0-1.0) and attach `confidence_reason`. Re-sort findings
-by (`confidence` desc, `severity` desc, `file`, `line`) and reassign ids
+**Resolve:** match each result by id, overwrite its `confidence` with
+`score / 10.0`, and attach `confidence_reason`. Re-sort findings by
+(`confidence` desc, `severity` desc, `file`, `line`) and reassign ids
 `F-001..` in that order. Compute `low_confidence_count` = findings with
-confidence < 0.4, for the summary line.
+confidence < 0.4, update the JSON checkpoint, then continue to Step 4.
 
 ## Step 4 — Write output
 
