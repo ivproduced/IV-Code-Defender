@@ -78,7 +78,7 @@ done
 ok "target + agent images built"
 
 step "Verification"
-ATAG=$(sudo env VULN_PIPELINE_CONTAINER_ENGINE=podman .venv/bin/python3 \
+ATAG=$(.venv/bin/python3 \
     -c 'import yaml; from harness.agent_image import agent_tag; t=agent_tag(yaml.safe_load(open("targets/canary/config.yaml"))["image_tag"]); print(t.rsplit(":", 1)[0] + ":latest")')
 host_kver=$(uname -r)
 guest_kver=$(sudo podman run --rm --runtime=runsc "$ATAG" uname -r) \
