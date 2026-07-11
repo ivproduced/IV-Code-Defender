@@ -101,7 +101,7 @@ def run(
     )
     if r.returncode != 0:
         raise RuntimeError(
-            f"docker run failed (exit {r.returncode}): {r.stderr.strip()}"
+            f"{selected_engine} run failed (exit {r.returncode}): {r.stderr.strip()}"
         )
     runtime_field = "{{.OCIRuntime}}" if selected_engine == "podman" else "{{.HostConfig.Runtime}}"
     actual_image, actual_runtime = subprocess.run(

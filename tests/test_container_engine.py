@@ -3,6 +3,8 @@
 """OCI container-engine selection tests."""
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from harness import docker_ops
@@ -51,3 +53,15 @@ def test_invalid_engine_is_rejected(monkeypatch):
     monkeypatch.setenv("VULN_PIPELINE_CONTAINER_ENGINE", "nerdctl")
     with pytest.raises(ValueError, match="docker.*podman"):
         docker_ops.engine()
+
+
+def test_run_failure_identifies_selected_engine(monkeypatch):
+    monkeypatch.setattr(docker_ops, "engine", lambda: "podman")
+
+    def failed_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stderr="container error")
+
+    monkeypatch.setattr(docker_ops.subprocess, "run", failed_run)
+
+    with pytest.raises(RuntimeError, match="podman run failed"):
+        docker_ops.run("image:tag", "test-container")
