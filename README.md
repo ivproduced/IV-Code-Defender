@@ -77,8 +77,18 @@ For a real target, begin with a small run to confirm the build, inputs, and
 focus areas before increasing concurrency:
 
 ```bash
+# Run the recon → find → verify → report loop
 bin/vp-sandboxed run <target> --model <model-id> --runs 3 --parallel --stream --auto-focus
+# Generate a candidate patch for each finding
 bin/vp-sandboxed patch results/<target>/<timestamp>/ --model <model-id>
+# Export NIST 800-53 / OSCAL assessment-results for FedRAMP tooling
+bin/vp-sandboxed oscal results/<target>/<timestamp>/
+```
+
+Or ask Claude Code to launch the pipeline and watch the run for you:
+
+```text
+run the pipeline on <target> and explain findings as they come
 ```
 
 Candidate patches are validated by rebuilding the target, replaying the
