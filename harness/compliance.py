@@ -1,6 +1,6 @@
 # Copyright 2026 Anthropic PBC
 # SPDX-License-Identifier: Apache-2.0
-"""NIST SP 800-53 Rev 5 control mapping + OSCAL export for verified crashes.
+"""NIST SP 800-53 Release 5.2.0 mapping + OSCAL 1.1.3 export.
 
 The harness verifies memory-safety crashes, so the mapping keys off the ASAN
 crash type and the report severity. Each finding ties to the controls a fix
@@ -13,7 +13,12 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from pathlib import Path
+
+NIST_SP_800_53_VERSION = "NIST SP 800-53 Release 5.2.0"
+OSCAL_VERSION = "1.1.3"
+_UUID_NAMESPACE = uuid.UUID("2c06aa18-a03c-5662-b0da-014d44708b63")
 
 NIST_CONTROLS = {
     "SA-11": ("Developer Security and Privacy Testing", "System and Services Acquisition"),
@@ -66,14 +71,17 @@ def enrich(report: dict) -> dict:
     report["compliance"] = {
         "cwe": cwe,
         "nist_800_53": control_detail(controls),
-        "framework": "NIST SP 800-53 Rev 5",
+        "framework": NIST_SP_800_53_VERSION,
     }
     return report
 
 
+def _stable_uuid(value: str) -> str:
+    return str(uuid.uuid5(_UUID_NAMESPACE, value))
+
+
 def build_oscal(results_dir: Path) -> dict:
-    """Aggregate every reports/bug_*/report.json into one OSCAL
-    assessment-results document."""
+    """Aggregate reports into an OSCAL 1.1.3 assessment-results document."""
     reports = sorted((results_dir / "reports").glob("bug_*/report.json"))
     findings = []
     for rp in reports:
@@ -84,8 +92,11 @@ def build_oscal(results_dir: Path) -> dict:
         sig = r.get("signature") or {}
         comp = r.get("compliance") or enrich(r)["compliance"]
         verdict = r.get("verdict") or {}
+        bug_id = r.get("bug_id", 0)
         findings.append({
-            "uuid": f"bug-{r.get('bug_id', 0):02d}",
+            "uuid": _stable_uuid(
+                f"finding:{bug_id}:{sig.get('crash_type', '')}:{sig.get('top_frame', '')}"
+            ),
             "title": f"{sig.get('crash_type', 'crash')} @ {sig.get('top_frame', '?')}",
             "target-status": {"state": "open"},
             "props": [
@@ -101,14 +112,14 @@ def build_oscal(results_dir: Path) -> dict:
         })
     return {
         "assessment-results": {
-            "uuid": "ivcd-assessment",
+            "uuid": _stable_uuid(f"assessment-results:{results_dir.resolve()}"),
             "metadata": {
                 "title": "IV-Code-Defender assessment results",
                 "last-modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "version": "1.0", "oscal-version": "1.1.2",
+                "version": "1.0", "oscal-version": OSCAL_VERSION,
             },
             "results": [{
-                "uuid": "ivcd-result",
+                "uuid": _stable_uuid(f"result:{results_dir.resolve()}"),
                 "title": "Execution-verified memory-safety findings",
                 "start": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "findings": findings,

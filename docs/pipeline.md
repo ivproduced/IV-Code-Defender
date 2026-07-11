@@ -89,9 +89,9 @@ observed re-runs) rather than plausible prose. Reports land in `reports/bug_NN/r
 and include the grader's score so you can tell which reports are most trustworthy.
 The `--novelty` modifier (off by default) lets the orchestrator check the upstream
 git history so the report can include whether the bug has already been fixed there.
-Each completed report also carries a CWE and NIST SP 800-53 Rev. 5 mapping.
-Run `bin/vp-sandboxed oscal <results-dir>` to aggregate those mappings into
-an OSCAL assessment-results document.
+Each completed report also carries a CWE and NIST SP 800-53 Release 5.2.0
+mapping. Run `bin/vp-sandboxed oscal <results-dir>` to aggregate those mappings
+into an OSCAL 1.1.3 assessment-results document.
 
 **Dedup.** A separate command that can be run post-hoc to cluster the pipeline
 results by ASAN signature. It's useful for a quick summary of "these N crashes

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Provider resolution + compliance mapping tests."""
 import json
+import uuid
 
 import pytest
 
@@ -52,6 +53,7 @@ def test_map_crash_uaf():
 def test_enrich():
     r = compliance.enrich({"signature": {"crash_type": "stack-overflow"}})
     assert r["compliance"]["cwe"] == "CWE-674"
+    assert r["compliance"]["framework"] == "NIST SP 800-53 Release 5.2.0"
     assert any(c["control_id"] == "SC-5" for c in r["compliance"]["nist_800_53"])
 
 
@@ -62,5 +64,13 @@ def test_build_oscal(tmp_path):
         {"signature": {"crash_type": "double-free", "top_frame": "f"},
          "bug_id": 1, "verdict": {"severity_rating": "CRITICAL"}}))
     doc = compliance.build_oscal(tmp_path)
-    f = doc["assessment-results"]["results"][0]["findings"]
+    assessment_results = doc["assessment-results"]
+    f = assessment_results["results"][0]["findings"]
     assert len(f) == 1 and f[0]["props"][1]["value"] == "CWE-415"
+    assert assessment_results["metadata"]["oscal-version"] == "1.1.3"
+    for identifier in (
+        assessment_results["uuid"],
+        assessment_results["results"][0]["uuid"],
+        f[0]["uuid"],
+    ):
+        assert str(uuid.UUID(identifier)) == identifier
