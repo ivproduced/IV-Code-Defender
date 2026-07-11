@@ -89,8 +89,7 @@ review before adoption.
 ## Security model
 
 - Interactive skills perform source-level analysis and artifact generation.
-- Autonomous pipeline agents execute only inside the configured gVisor
-  sandbox, with network egress restricted to the model API.
+- Autonomous pipeline agents run inside the configured gVisor sandbox with network egress restricted to the model API, and refuse to start outside it unless you explicitly pass `--dangerously-no-sandbox`.
 - Find and grade agents use separate containers; only the proof-of-concept
   input crosses the trust boundary.
 - Do not mount secrets, production credentials, or sensitive host paths into
