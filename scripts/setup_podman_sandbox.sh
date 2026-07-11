@@ -11,9 +11,18 @@ step() { printf '\n\033[1;34m== %s ==\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ok\033[0m  %s\n' "$*"; }
 die()  { printf '\033[1;31m  fail\033[0m %s\n' "$*" >&2; exit 1; }
 
+assert_safe_checkout() {
+    local unsafe_path
+    unsafe_path=$(find -L "$REPO_ROOT" -xdev \( -type f -o -type d \) \
+        \( -perm -0020 -o -perm -0002 \) -print -quit)
+    [ -z "$unsafe_path" ] || die \
+        "refusing to run repository Python with sudo: group/other-writable path: $unsafe_path"
+}
+
 [ "$(uname -s)" = "Linux" ] || die "gVisor requires Linux."
 command -v podman >/dev/null || die "install Podman first."
 case "$(uname -m)" in x86_64|aarch64) ARCH=$(uname -m) ;; *) die "unsupported architecture $(uname -m)" ;; esac
+assert_safe_checkout
 
 RUNSC_BIN=/usr/local/bin/runsc
 RUNSC_RELEASE=${RUNSC_RELEASE:-20260420}
