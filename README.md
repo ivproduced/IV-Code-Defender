@@ -182,6 +182,11 @@ with `--provider` or `VULN_PIPELINE_PROVIDER`:
 Reports carry NIST SP 800-53 Rev 5 + CWE mappings; `oscal` rolls them into an
 OSCAL document. Free for government use — see [`NOTICE`](NOTICE).
 
+The sandbox uses Docker by default. Rootful Podman is also supported on Linux:
+run `./scripts/setup_podman_sandbox.sh`, then launch with
+`sudo -E env VULN_PIPELINE_CONTAINER_ENGINE=podman bin/vp-sandboxed ...`.
+See [agent sandbox](docs/agent-sandbox.md#podman).
+
 Results from the loop land in a `results/drlibs/<timestamp>/` directory. With 
 the `--stream` flag, the first report will appear in minutes under `reports/bug_NN/`.
 

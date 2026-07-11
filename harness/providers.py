@@ -60,9 +60,12 @@ def resolve_provider_env(provider: str) -> ProviderEnv:
         )
 
     if provider == "anthropic":
-        env = _passthrough(("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
-                            "ANTHROPIC_BASE_URL"))
-        if not (env.get("ANTHROPIC_API_KEY") or env.get("CLAUDE_CODE_OAUTH_TOKEN")):
+        env = _passthrough(("ANTHROPIC_BASE_URL",))
+        if key := os.environ.get("ANTHROPIC_API_KEY"):
+            env["ANTHROPIC_API_KEY"] = key
+        elif token := os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        else:
             return ProviderEnv(provider, env, [])  # auth checked by caller
         hosts = []
         if base := env.get("ANTHROPIC_BASE_URL"):

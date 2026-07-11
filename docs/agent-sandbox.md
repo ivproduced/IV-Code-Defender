@@ -33,8 +33,8 @@ on the same network, which only forwards traffic to the model API.
 
 ## One-time setup
 
-Run this once per machine. It needs `sudo` (to install a new Docker runtime
-and edit `/etc/docker/daemon.json`) and is safe to re-run.
+Run this once per Linux VM. It needs `sudo` (to install a new OCI runtime and
+configure the selected container engine) and is safe to re-run.
 
 ```bash
 ./scripts/setup_sandbox.sh
@@ -53,6 +53,36 @@ the Claude Code CLI installed (for running the agent).
 gVisor only runs on Linux. On macOS or Windows, run the pipeline
 inside a Linux VM or use `--dangerously-no-sandbox` (see 
 [Opting out](#opting-out) for details on what you lose).
+
+### Linux VM prerequisites
+
+Use a supported Linux x86_64 or aarch64 VM with Docker or **rootful Podman**,
+Python 3.11+, `sudo`, `curl`, and enough disk/memory to build target images.
+Nested virtualization is not required: gVisor is an OCI runtime, not a
+hardware virtual machine. Do not mount host credential directories into agent
+containers. For Bedrock, make AWS credentials available only as environment
+variables for the launch command.
+
+### Podman
+
+Podman is supported through the rootful system store. Rootless Podman is
+deliberately rejected because this harness depends on a host-installed gVisor
+runtime and reliable cgroup/memory behavior.
+
+```bash
+# Set this before setup if using Bedrock/Vertex or another endpoint.
+export VP_EGRESS_ALLOW="api.anthropic.com:443,bedrock-runtime.us-east-1.amazonaws.com:443"
+./scripts/setup_podman_sandbox.sh
+
+# sudo -E preserves ANTHROPIC_*, AWS_*, and provider environment variables.
+sudo -E env VULN_PIPELINE_CONTAINER_ENGINE=podman \
+  bin/vp-sandboxed run canary --provider bedrock --model <model-id> --runs 3 --parallel --stream
+```
+
+The script writes `/etc/containers/containers.conf.d/90-vuln-pipeline-runsc.conf`,
+uses `runsc` per container, creates the same internal `vp-internal` network and
+allowlist proxy as Docker, then validates gVisor, filesystem isolation, and
+network egress. Use `scripts/setup_sandbox.sh` for Docker.
 
 The proxy only allows traffic to `api.anthropic.com:443` by default,
 so if your API traffic goes elsewhere (i.e., you use a non-default

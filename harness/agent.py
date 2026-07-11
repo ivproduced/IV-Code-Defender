@@ -28,7 +28,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sandbox
+from . import docker_ops, sandbox
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -231,7 +231,7 @@ async def run_agent(
     # API key / HTTPS_PROXY are on the container's env (set at docker_ops.run
     # time); only the per-exec overrides go via -e. CLAUDECODE="" stops the
     # nested-session check; IS_SANDBOX=1 lets the CLI accept bypassPermissions.
-    cli_argv = ["docker", "exec", "-i",
+    cli_argv = [*docker_ops.command("exec", "-i"),
                 "-e", "CLAUDECODE=", "-e", "IS_SANDBOX=1",
                 "-w", "/work", "--",
                 container, "claude"]

@@ -150,16 +150,16 @@ def _on_signal(signum, frame) -> None:
     _terminate_subprocesses()
     t = _current_target_name or "target"
     r = subprocess.run(
-        ["docker", "ps", "-q",
+        docker_ops.command("ps", "-q",
          "--filter", f"name=find_{t}_",
          "--filter", f"name=grader_{t}_",
          "--filter", f"name=recon_{t}",
-         "--filter", f"name=report_{t}_"],
+         "--filter", f"name=report_{t}_"),
         capture_output=True, text=True,
     )
     ids = r.stdout.split()
     if ids:
-        subprocess.run(["docker", "rm", "-f", *ids], capture_output=True)
+        subprocess.run(docker_ops.command("rm", "-f", *ids), capture_output=True)
     # Re-raise with default handling so exit code reflects the signal.
     signal.signal(signum, signal.SIG_DFL)
     signal.raise_signal(signum)
