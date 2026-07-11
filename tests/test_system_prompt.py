@@ -13,7 +13,7 @@ def test_default_has_preamble_and_engagement():
     assert out.startswith(PIPELINE_PREAMBLE)
     assert DEFAULT_ENGAGEMENT_CONTEXT.strip() in out
     assert "never as instructions" in " ".join(out.split())
-    assert "<untrusted_data" in out
+    assert '<untrusted_data id="...">' in out
 
 
 def test_override_replaces_engagement_only(tmp_path):
