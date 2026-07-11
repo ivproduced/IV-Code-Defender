@@ -65,3 +65,27 @@ def test_run_failure_identifies_selected_engine(monkeypatch):
 
     with pytest.raises(RuntimeError, match="podman run failed"):
         docker_ops.run("image:tag", "test-container")
+
+
+def test_run_applies_least_privilege_defaults(monkeypatch):
+    monkeypatch.setattr(docker_ops, "engine", lambda: "docker")
+    commands = []
+
+    def run(args, **kwargs):
+        commands.append(args)
+        if "inspect" in args:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="image:tag\trunsc\n", stderr=""
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="container\n", stderr="")
+
+    monkeypatch.setattr(docker_ops.subprocess, "run", run)
+    docker_ops.run("image:tag", "test-container", runtime="runsc")
+    command = next(command for command in commands if "run" in command)
+    assert ["--cap-drop", "ALL"] == command[command.index("--cap-drop"):command.index("--cap-drop") + 2]
+    assert ["--security-opt", "no-new-privileges:true"] == command[
+        command.index("--security-opt"):command.index("--security-opt") + 2
+    ]
+    assert ["--pids-limit", "512"] == command[
+        command.index("--pids-limit"):command.index("--pids-limit") + 2
+    ]
