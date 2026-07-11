@@ -24,7 +24,7 @@ tell them they have. For that reason, **constraints must be enforced in code,
 not in prompts.**
 
 This repo does that for you. Every agent runs inside a gVisor container
-with network egress limited to the Claude API (as described in 
+with network egress limited to the selected model-provider endpoint (as described in
 [agent-sandbox.md](agent-sandbox.md)). Agent-spawning subcommands refuse to
 start outside that sandbox unless you explicitly pass `--dangerously-no-sandbox`.
 
@@ -66,7 +66,8 @@ In this repo, that split looks like:
 1. Setup: Building the target image - `docker build` pulls dependencies
    and compiles the target with normal network access. The agents then run
    against that image on the `vp-internal` network, where the only way out 
-   is the allowlist proxy (`api.anthropic.com:443` by default).
+   is the allowlist proxy (`api.anthropic.com:443` by default; configure an
+   additional approved provider endpoint before setup when needed).
 2. Freeze: the image is the snapshot. Base images, commit SHAs, and dependency 
    versions are pinned in the Dockerfile so every run uses the same bits.
 

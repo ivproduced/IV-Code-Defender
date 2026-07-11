@@ -21,7 +21,7 @@ CLI flag, and rate-limit math, see [`docs/pipeline.md`](../docs/pipeline.md).
   inside a Linux VM.
 - Docker.
 - Python 3.11+.
-- An Anthropic API key or Claude Code OAuth token.
+- Credentials for the Anthropic API, Amazon Bedrock, or Google Vertex.
 
 ## Demo: find real CVEs in dr_libs
 
@@ -50,6 +50,12 @@ export VULN_PIPELINE_MODEL=<model-id>      # Claude Opus recommended; override p
 # (Build it directly to see what's inside: docker build -t vuln-pipeline-drlibs:latest targets/drlibs/)
 ./scripts/setup_sandbox.sh
 ```
+
+For Bedrock or Vertex, set `--provider bedrock` or `--provider vertex` on
+agent-spawning commands and configure its credentials and egress allowlist
+before running the setup script. See
+[`docs/agent-sandbox.md`](../docs/agent-sandbox.md#podman) for the required
+hosts.
 
 ### Run (end to end)
 
@@ -111,7 +117,7 @@ bin/vp-sandboxed recon drlibs
 bin/vp-sandboxed run drlibs --runs 3 --parallel
 
 # Report after the fact, once all grades land
-vuln-pipeline report results/drlibs/<timestamp>/
+bin/vp-sandboxed report results/drlibs/<timestamp>/
 
 # Patch
 bin/vp-sandboxed patch results/drlibs/<timestamp>/
@@ -137,8 +143,9 @@ for line in sys.stdin:
 
 ```bash
 vuln-pipeline dedup  results/drlibs/<timestamp>/   # group crashes by root-cause signature
-vuln-pipeline report results/drlibs/<timestamp>/   # exploitability analysis per unique bug
-vuln-pipeline run    drlibs --resume results/drlibs/<timestamp>/   # retry failed/killed runs
+bin/vp-sandboxed report results/drlibs/<timestamp>/ # exploitability analysis per unique bug
+bin/vp-sandboxed run drlibs --resume results/drlibs/<timestamp>/ # retry failed/killed runs
+bin/vp-sandboxed oscal results/drlibs/<timestamp>/ # export NIST/CWE mappings as OSCAL
 ```
 
 ## Other targets

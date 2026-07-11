@@ -22,8 +22,7 @@ This repo is not maintained and is not accepting contributions.
 > This repository is an open-source reference implementation based on general
 > best practices for finding vulnerabilities using Claude. You can use it to
 > build your own vulnerability finding pipeline, customize the logic, and it
-> can be used with whatever access you have to Claude APIs (including
-> Bedrock, Vertex, or Azure).
+> can use the Anthropic API, Amazon Bedrock, or Google Vertex.
 
 ## Contents
 
@@ -66,7 +65,7 @@ claude
 ## Further Reading
 
 - [**Blog Post**](docs/blog-post.md) · The accompanying blog post with learnings + best practices
-- [**Pipeline**](docs/pipeline.md) · How it works: diagram, stages, CLI flags
+- [**Pipeline**](docs/pipeline.md) · How it works: diagram, stages, CLI flags, providers, and exports
 - [**Security**](docs/security.md) · Sandboxing, what not to mount
 - [**Agent sandbox**](docs/agent-sandbox.md) · gVisor isolation + egress allowlist for every agent
 - [**Customize**](docs/customizing.md) · Port to my stack; which files change and why
@@ -175,12 +174,13 @@ with `--provider` or `VULN_PIPELINE_PROVIDER`:
 | Provider | Flag | Auth | Notes |
 |---|---|---|---|
 | Anthropic API | `--provider anthropic` (default) | `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` | — |
-| Amazon Bedrock | `--provider bedrock` | `AWS_*` + `AWS_REGION` | allowlist `bedrock-runtime.<region>.amazonaws.com:443` |
-| Google Vertex | `--provider vertex` | GCP creds + `CLOUD_ML_REGION` | allowlist `<region>-aiplatform.googleapis.com:443` |
+| Amazon Bedrock | `--provider bedrock` | `AWS_*`; `AWS_REGION` selects the region | allowlist `bedrock-runtime.<region>.amazonaws.com:443` and `bedrock.<region>.amazonaws.com:443` |
+| Google Vertex | `--provider vertex` | `ANTHROPIC_VERTEX_PROJECT_ID` and Google Application Default Credentials; `CLOUD_ML_REGION` selects the region | allowlist `<region>-aiplatform.googleapis.com:443` |
 | OpenAI / Azure / Ollama | — | — | reserved for a future static pass; can't host the fleet |
 
 Reports carry NIST SP 800-53 Rev 5 + CWE mappings; `oscal` rolls them into an
-OSCAL document. Free for government use — see [`NOTICE`](NOTICE).
+OSCAL assessment-results document at `<results_dir>/oscal.json` (or the path
+given with `--out`). Free for government use — see [`NOTICE`](NOTICE).
 
 The sandbox uses Docker by default. Rootful Podman is also supported on Linux:
 run `./scripts/setup_podman_sandbox.sh`, then launch with

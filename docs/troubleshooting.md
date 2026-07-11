@@ -24,6 +24,16 @@ without losing conversation context (see
 [pipeline.md#resume-on-error](pipeline.md#resume-on-error)).
 You should not need to throttle far below provisioned capacity.
 
+## Provider setup failures
+
+The autonomous fleet supports the Anthropic API, Amazon Bedrock, and Google
+Vertex only. Confirm that the selected `--provider` (or
+`VULN_PIPELINE_PROVIDER`) has credentials available to the launch command and
+that its endpoint was included in `VP_EGRESS_ALLOW` before the sandbox setup
+script ran. The required Bedrock and Vertex endpoints are listed in
+[agent-sandbox.md](agent-sandbox.md#podman). Re-run the setup script after
+changing the allowlist.
+
 ## Skill run died mid-way on a large codebase
 
 `/threat-model bootstrap` and `/triage` write per-stage checkpoints to
