@@ -89,7 +89,9 @@ def _resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
         print(color(
             f"[provider:{prov}] ensure egress allowlist includes: {needed}\n"
             f"  set VP_EGRESS_ALLOW=\"api.anthropic.com:443,{','.join(penv.egress_hosts)}\" "
-            f"before scripts/setup_sandbox.sh", "dim", sys.stderr), file=sys.stderr)
+            f"before the matching setup script: scripts/setup_sandbox.sh (Docker) "
+            f"or scripts/setup_podman_sandbox.sh (Podman)", "dim", sys.stderr),
+            file=sys.stderr)
     return env
 
 
