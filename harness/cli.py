@@ -23,7 +23,8 @@
 Output: ./results/<target>/<timestamp>/{result.json,find_transcript.jsonl,
 grade_transcript.jsonl,poc.bin}; reports → .../reports/bug_NN/
 
-Auth: ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN env var (one required).
+Auth: resolved by ``harness.auth`` (Bedrock / Vertex / ANTHROPIC_API_KEY /
+CLAUDE_CODE_OAUTH_TOKEN — one required; see docs/agent-sandbox.md).
 Model: --model flag, or VULN_PIPELINE_MODEL env var (required, one or the other).
 """
 from __future__ import annotations
@@ -54,6 +55,10 @@ from .patch import run_patch, PATCH_MAX_TURNS, DEFAULT_MAX_ITERATIONS
 from .recon import run_recon, RECON_MAX_TURNS
 from .report import run_report, REPORT_MAX_TURNS
 from .prompts.system_prompt import build_system_prompt
+from .auth import (
+    resolve_auth_env as _resolve_environment_auth,
+    warn_bedrock_model as _warn_bedrock_model,
+)
 
 
 NO_AUTH_MSG = (
@@ -77,6 +82,11 @@ def _resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
     When their regional endpoints need allowlisting, setup guidance is printed
     for VP_EGRESS_ALLOW.
     """
+    # Prefer the upstream environment-based resolver when no legacy provider
+    # selector was supplied. This keeps setup and runtime preflights aligned.
+    if provider is None:
+        return _resolve_environment_auth()
+
     prov = providers.resolve_provider(provider)
     penv = providers.resolve_provider_env(prov)
     env = dict(penv.env)
@@ -93,6 +103,17 @@ def _resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
             f"or scripts/setup_podman_sandbox.sh (Podman)", "dim", sys.stderr),
             file=sys.stderr)
     return env
+
+
+def _provider_name(provider: str | None) -> str:
+    """Report the selected provider for both CLI and environment-based modes."""
+    if provider is not None:
+        return providers.resolve_provider(provider)
+    if os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1":
+        return "bedrock"
+    if os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1":
+        return "vertex"
+    return "anthropic"
 
 
 def _resolve_target_dir(target: str) -> Path:
@@ -1001,11 +1022,12 @@ def _cmd_run(args) -> int:
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)
         return 1
+    _warn_bedrock_model(args.model)
 
     print(f"Target: {target.name}")
     print(f"  image_tag:   {target.image_tag}")
     print(f"  model:       {args.model}")
-    print(f"  provider:    {providers.resolve_provider(getattr(args,'provider',None))}")
+    print(f"  provider:    {_provider_name(getattr(args, 'provider', None))}")
     print(f"  binary:      {target.binary_path}")
     print(f"  source_root: {target.source_root}")
     print(f"  max_turns:   {args.max_turns}")
@@ -1069,6 +1091,7 @@ def _cmd_recon(args) -> int:
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)
         return 1
+    _warn_bedrock_model(args.model)
 
     print(color(f"[build] Building {target.image_tag} ...", "dim", sys.stderr), file=sys.stderr)
     try:
@@ -1251,6 +1274,7 @@ def _cmd_report(args) -> int:
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)
         return 1
+    _warn_bedrock_model(args.model)
 
     groups = dedup(root)
     if not groups:
@@ -1345,6 +1369,7 @@ def _cmd_patch(args) -> int:
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)
         return 1
+    _warn_bedrock_model(args.model)
 
     groups = dedup(root)
     if not groups:
