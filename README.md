@@ -159,11 +159,33 @@ export ANTHROPIC_API_KEY=sk-ant-...   # or CLAUDE_CODE_OAUTH_TOKEN; the pipeline
 bin/vp-sandboxed run drlibs --model <model-id> --runs 3 --parallel --stream --auto-focus
 # Generate a candidate patch for each finding
 bin/vp-sandboxed patch results/drlibs/<timestamp>/ --model <model-id>
+# Export NIST 800-53 / OSCAL assessment-results for FedRAMP tooling
+bin/vp-sandboxed oscal results/drlibs/<timestamp>/
 
 # Or, ask Claude Code to launch the pipeline and watch the run for you
 claude
 > run the pipeline on drlibs and explain findings as they come
 ```
+
+### Model providers
+
+The agent fleet runs `claude -p`, so it uses a Claude-capable backend. Select
+with `--provider` or `VULN_PIPELINE_PROVIDER`:
+
+| Provider | Flag | Auth | Notes |
+|---|---|---|---|
+| Anthropic API | `--provider anthropic` (default) | `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` | — |
+| Amazon Bedrock | `--provider bedrock` | `AWS_*` + `AWS_REGION` | allowlist `bedrock-runtime.<region>.amazonaws.com:443` |
+| Google Vertex | `--provider vertex` | GCP creds + `CLOUD_ML_REGION` | allowlist `<region>-aiplatform.googleapis.com:443` |
+| OpenAI / Azure / Ollama | — | — | reserved for a future static pass; can't host the fleet |
+
+Reports carry NIST SP 800-53 Rev 5 + CWE mappings; `oscal` rolls them into an
+OSCAL document. Free for government use — see [`NOTICE`](NOTICE).
+
+The sandbox uses Docker by default. Rootful Podman is also supported on Linux:
+run `./scripts/setup_podman_sandbox.sh`, then launch with
+`sudo -E env VULN_PIPELINE_CONTAINER_ENGINE=podman bin/vp-sandboxed ...`.
+See [agent sandbox](docs/agent-sandbox.md#podman).
 
 Results from the loop land in a `results/drlibs/<timestamp>/` directory. With 
 the `--stream` flag, the first report will appear in minutes under `reports/bug_NN/`.

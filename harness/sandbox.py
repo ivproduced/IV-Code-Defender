@@ -116,13 +116,18 @@ def require(override: bool) -> str | None:
             "  --dangerously-no-sandbox to run without gVisor isolation\n"
             "  (auto-mode permission classifier only; development use — see docs/security.md)."
         )
-    runtimes = subprocess.run(
-        ["docker", "info", "--format", "{{range $k,$v := .Runtimes}}{{$k}} {{end}}"],
+    try:
+        docker_ops.engine()
+    except (RuntimeError, ValueError) as e:
+        return f"error: {e}"
+    probe = subprocess.run(
+        docker_ops.command("run", "--rm", "--runtime", rt, "alpine:3.21", "true"),
         capture_output=True,
         text=True,
-    ).stdout.split()
-    if rt not in runtimes:
+    )
+    if probe.returncode != 0:
         return (
-            f"error: {RUNTIME_ENV}={rt!r} but docker has no such runtime ({runtimes})"
+            f"error: {RUNTIME_ENV}={rt!r} cannot start a sandbox container via "
+            f"{docker_ops.engine()}: {probe.stderr.strip()}"
         )
     return None

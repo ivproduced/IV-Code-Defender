@@ -35,7 +35,7 @@ def _build(dockerfile: str, tag: str) -> None:
         with open(f"{ctx}/Dockerfile", "w") as f:
             f.write(dockerfile)
         subprocess.run(
-            ["docker", "build", "-q", "-t", tag, ctx],
+            docker_ops.command("build", "-q", "-t", tag, ctx),
             check=True,
             capture_output=True,
             text=True,
@@ -77,7 +77,7 @@ def ensure(target_tag: str) -> str:
         tag,
     )
     subprocess.run(
-        ["docker", "tag", tag, f"{tag.rsplit(':', 1)[0]}:latest"],
+        docker_ops.command("tag", tag, f"{tag.rsplit(':', 1)[0]}:latest"),
         check=True,
     )
     return tag

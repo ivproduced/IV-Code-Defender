@@ -27,14 +27,21 @@ def test_require_passes_with_override(monkeypatch):
 
 def test_require_checks_runtime_is_registered(monkeypatch):
     monkeypatch.setenv(sandbox.RUNTIME_ENV, "runsc")
+    monkeypatch.setattr(sandbox.docker_ops, "engine", lambda: "docker")
+    monkeypatch.setattr(sandbox.docker_ops, "command", lambda *args: ["docker", *args])
     monkeypatch.setattr(
         sandbox.subprocess,
         "run",
-        lambda *a, **k: mock.Mock(stdout="runc runsc io.containerd.runc.v2 "),
+        lambda *a, **k: mock.Mock(returncode=0, stderr=""),
     )
     assert sandbox.require(override=False) is None
 
     monkeypatch.setenv(sandbox.RUNTIME_ENV, "nosuch")
+    monkeypatch.setattr(
+        sandbox.subprocess,
+        "run",
+        lambda *a, **k: mock.Mock(returncode=1, stderr="no such runtime"),
+    )
     err = sandbox.require(override=False)
     assert err and "no such runtime" in err
 

@@ -31,8 +31,10 @@ start outside that sandbox unless you explicitly pass `--dangerously-no-sandbox`
 ## Rules for running autonomous agents
 
 - Launch the pipeline using `bin/vp-sandboxed` which verifies the sandbox
-  is set up before starting any agents.
-- Don't run autonomous agents in plain Docker (with `runc`). Ordinary 
+  is set up before starting any agents. Docker is the default; rootful Podman
+  is supported with `VULN_PIPELINE_CONTAINER_ENGINE=podman` after
+  `scripts/setup_podman_sandbox.sh`.
+- Don't run autonomous agents in plain Docker or Podman (with `runc`). Ordinary
   containers share your host's kernel, so a kernel bug triggered by the
   target inside the container can compromise your host.
 - Don't run containers with `--privileged` or with host networking.

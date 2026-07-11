@@ -41,3 +41,10 @@ def test_none():
 def test_error_message_names_all_modes():
     assert "ANTHROPIC_API_KEY" in NO_AUTH_MSG
     assert "CLAUDE_CODE_OAUTH_TOKEN" in NO_AUTH_MSG
+
+
+def test_provider_egress_guidance_names_matching_setup_scripts(capsys):
+    _resolve_auth_env("bedrock")
+    err = capsys.readouterr().err
+    assert "scripts/setup_sandbox.sh (Docker)" in err
+    assert "scripts/setup_podman_sandbox.sh (Podman)" in err

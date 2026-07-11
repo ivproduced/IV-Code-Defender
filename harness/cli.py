@@ -40,7 +40,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import docker_ops, sandbox
+from . import docker_ops, providers, sandbox, compliance
 from .agent import color
 from .artifacts import CrashArtifact, RunResult
 from .asan import asan_excerpt, crash_reason, top_frame
@@ -57,28 +57,42 @@ from .prompts.system_prompt import build_system_prompt
 
 
 NO_AUTH_MSG = (
-    "error: no Anthropic auth found. Set one of:\n"
-    "  ANTHROPIC_API_KEY                     (long-lived key)\n"
-    "  CLAUDE_CODE_OAUTH_TOKEN               (from `claude setup-token`)"
+    "error: no auth found for the selected provider.\n"
+    "  anthropic: ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN\n"
+    "  bedrock:   AWS_* creds + --provider bedrock (CLAUDE_CODE_USE_BEDROCK)\n"
+    "  vertex:    GCP creds + --provider vertex (CLAUDE_CODE_USE_VERTEX)"
 )
 
 
-def _resolve_auth_env() -> dict[str, str] | None:
-    """Resolve auth for the in-container `claude -p` process. Returns the env
-    dict set on the agent container at ``docker run`` time, or None if no auth
-    is configured.
+def _resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
+    """Resolve provider + auth for the in-container `claude -p` process. Returns
+    the env dict set on the agent container at ``docker run`` time, or None if
+    auth is missing.
 
-    Precedence:
+    Anthropic precedence:
       1. ANTHROPIC_API_KEY            — long-lived key
       2. CLAUDE_CODE_OAUTH_TOKEN      — subscription-plan token
+
+    Bedrock/Vertex authenticate through the cloud SDK env (AWS_*/GCP creds).
+    When their regional endpoints need allowlisting, setup guidance is printed
+    for VP_EGRESS_ALLOW.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
-        return {"ANTHROPIC_API_KEY": api_key}
-    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if oauth_token:
-        return {"CLAUDE_CODE_OAUTH_TOKEN": oauth_token}
-    return None
+    prov = providers.resolve_provider(provider)
+    penv = providers.resolve_provider_env(prov)
+    env = dict(penv.env)
+    if prov == "anthropic" and not (
+        env.get("ANTHROPIC_API_KEY") or env.get("CLAUDE_CODE_OAUTH_TOKEN")
+    ):
+        return None
+    if penv.egress_hosts:
+        needed = ", ".join(penv.egress_hosts)
+        print(color(
+            f"[provider:{prov}] ensure egress allowlist includes: {needed}\n"
+            f"  set VP_EGRESS_ALLOW=\"api.anthropic.com:443,{','.join(penv.egress_hosts)}\" "
+            f"before the matching setup script: scripts/setup_sandbox.sh (Docker) "
+            f"or scripts/setup_podman_sandbox.sh (Podman)", "dim", sys.stderr),
+            file=sys.stderr)
+    return env
 
 
 def _resolve_target_dir(target: str) -> Path:
@@ -138,16 +152,16 @@ def _on_signal(signum, frame) -> None:
     _terminate_subprocesses()
     t = _current_target_name or "target"
     r = subprocess.run(
-        ["docker", "ps", "-q",
+        docker_ops.command("ps", "-q",
          "--filter", f"name=find_{t}_",
          "--filter", f"name=grader_{t}_",
          "--filter", f"name=recon_{t}",
-         "--filter", f"name=report_{t}_"],
+         "--filter", f"name=report_{t}_"),
         capture_output=True, text=True,
     )
     ids = r.stdout.split()
     if ids:
-        subprocess.run(["docker", "rm", "-f", *ids], capture_output=True)
+        subprocess.run(docker_ops.command("rm", "-f", *ids), capture_output=True)
     # Re-raise with default handling so exit code reflects the signal.
     signal.signal(signum, signal.SIG_DFL)
     signal.raise_signal(signum)
@@ -831,6 +845,8 @@ def main() -> int:
                        help=f"Recon-agent turn budget for --auto-focus (default {RECON_MAX_TURNS})")
     p_run.add_argument("--model", default=os.environ.get("VULN_PIPELINE_MODEL"),
                        help="Model string (required; or set VULN_PIPELINE_MODEL)")
+    p_run.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
+                       help="Model provider: anthropic (default), bedrock, vertex")
     p_run.add_argument("--results-dir", default="./results", help="Output root")
     p_run.add_argument("--resume", type=Path, default=None, metavar="DIR",
                        help="Resume a partially-completed batch dir (results/<target>/<ts>/). "
@@ -864,6 +880,8 @@ def main() -> int:
     p_recon.add_argument("target", help="Target name (under ./targets/) or path to target dir")
     p_recon.add_argument("--model", default=os.environ.get("VULN_PIPELINE_MODEL"),
                          help="Model string (required; or set VULN_PIPELINE_MODEL)")
+    p_recon.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
+                       help="Model provider: anthropic (default), bedrock, vertex")
     p_recon.add_argument("--max-turns", type=int, default=RECON_MAX_TURNS,
                          help=f"Recon-agent turn budget (default {RECON_MAX_TURNS})")
     p_recon.add_argument("--engagement-context", type=Path, default=None,
@@ -881,6 +899,8 @@ def main() -> int:
                           help="Batch directory (results/<target>/<timestamp>/)")
     p_report.add_argument("--model", default=os.environ.get("VULN_PIPELINE_MODEL"),
                           help="Model string (required; or set VULN_PIPELINE_MODEL)")
+    p_report.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
+                       help="Model provider: anthropic (default), bedrock, vertex")
     p_report.add_argument("--parallel", action="store_true",
                           help="Run report agents concurrently")
     p_report.add_argument("--max-turns", type=int, default=REPORT_MAX_TURNS,
@@ -908,6 +928,8 @@ def main() -> int:
                          help="Only patch bug_NN (default: all)")
     p_patch.add_argument("--model", default=os.environ.get("VULN_PIPELINE_MODEL"),
                          help="Model string (required; or set VULN_PIPELINE_MODEL)")
+    p_patch.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
+                       help="Model provider: anthropic (default), bedrock, vertex")
     p_patch.add_argument("--parallel", action="store_true",
                          help="Run patch agents concurrently")
     p_patch.add_argument("--max-turns", type=int, default=PATCH_MAX_TURNS,
@@ -924,6 +946,13 @@ def main() -> int:
                          action="store_true", help="See `run --help`.")
     p_patch.add_argument("--engagement-context", type=Path, default=None,
                          help="Path to an authorization/engagement-scope file (see `run --help`)")
+
+    p_oscal = sub.add_parser("oscal",
+                             help="Export NIST 800-53 / OSCAL assessment-results JSON from reports")
+    p_oscal.add_argument("results_dir", type=Path,
+                         help="Batch directory containing reports/bug_*/report.json")
+    p_oscal.add_argument("-o", "--out", type=Path, default=None,
+                         help="Output path (default: <results_dir>/oscal.json)")
 
     args = parser.parse_args()
 
@@ -942,6 +971,13 @@ def main() -> int:
         return _cmd_report(args)
     if args.command == "patch":
         return _cmd_patch(args)
+    if args.command == "oscal":
+        out = args.out or (args.results_dir / "oscal.json")
+        doc = compliance.build_oscal(args.results_dir)
+        n = len(doc["assessment-results"]["results"][0]["findings"])
+        out.write_text(json.dumps(doc, indent=2))
+        print(f"  {n} finding(s) → {out}")
+        return 0
     return 1
 
 
@@ -956,7 +992,7 @@ def _cmd_run(args) -> int:
     global _current_target_name
     _current_target_name = target.name
 
-    agent_env = _resolve_auth_env()
+    agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
         print(NO_AUTH_MSG, file=sys.stderr)
         return 1
@@ -969,6 +1005,7 @@ def _cmd_run(args) -> int:
     print(f"Target: {target.name}")
     print(f"  image_tag:   {target.image_tag}")
     print(f"  model:       {args.model}")
+    print(f"  provider:    {providers.resolve_provider(getattr(args,'provider',None))}")
     print(f"  binary:      {target.binary_path}")
     print(f"  source_root: {target.source_root}")
     print(f"  max_turns:   {args.max_turns}")
@@ -1024,7 +1061,7 @@ def _cmd_recon(args) -> int:
     global _current_target_name
     _current_target_name = target.name
 
-    agent_env = _resolve_auth_env()
+    agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
         print(NO_AUTH_MSG, file=sys.stderr)
         return 1
@@ -1174,6 +1211,8 @@ async def _report_one(
 
 
 def _write_report_json(out_dir: Path, d: dict) -> None:
+    if d.get("signature"):
+        compliance.enrich(d)
     with open(out_dir / "report.json", "w") as f:
         json.dump(d, f, indent=2)
 
@@ -1204,7 +1243,7 @@ def _cmd_report(args) -> int:
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 1
 
-    agent_env = _resolve_auth_env()
+    agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
         print(NO_AUTH_MSG, file=sys.stderr)
         return 1
@@ -1299,7 +1338,7 @@ def _cmd_patch(args) -> int:
     if not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 1
-    agent_env = _resolve_auth_env()
+    agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
         print(NO_AUTH_MSG, file=sys.stderr)
         return 1
