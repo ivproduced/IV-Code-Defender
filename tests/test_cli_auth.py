@@ -1,8 +1,9 @@
 # Copyright 2026 Anthropic PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Auth-resolver coverage: API key, OAuth token, none."""
+"""Back-compat shim: cli._resolve_auth_env / NO_AUTH_MSG re-export harness.auth."""
 import pytest
 
+import harness.auth as auth
 from harness.cli import _resolve_auth_env, NO_AUTH_MSG
 
 
@@ -20,18 +21,24 @@ def _clear_auth(monkeypatch):
 
 def test_api_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
-    assert _resolve_auth_env() == {"ANTHROPIC_API_KEY": "sk-ant-x"}
+    env = _resolve_auth_env()
+    assert env and env["ANTHROPIC_API_KEY"] == "sk-ant-x"
+    assert "ANTHROPIC_CUSTOM_HEADERS" in env
 
 
 def test_oauth_token(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
-    assert _resolve_auth_env() == {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}
+    env = _resolve_auth_env()
+    assert env and env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+    assert "ANTHROPIC_CUSTOM_HEADERS" in env
 
 
 def test_precedence_api_key_over_oauth(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
-    assert _resolve_auth_env() == {"ANTHROPIC_API_KEY": "sk-ant-x"}
+    env = _resolve_auth_env()
+    assert env and env["ANTHROPIC_API_KEY"] == "sk-ant-x"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
 def test_none():

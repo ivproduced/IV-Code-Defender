@@ -9,7 +9,8 @@ This repo has two halves:
   `VULN-FINDINGS.json`), `/triage` (verify + dedupe + rank a findings pile),
   `/patch` (generate candidate fixes → `PATCHES/`), `/customize` (port the
   pipeline to another stack). Route the user to these for scoping, static
-  review, Q&A, and post-run triage.
+  review, Q&A, and post-run triage. (`/verify` is contributor tooling for
+  validating harness changes on docker-less hosts, not part of the user flow.)
 - **`vuln-pipeline`** (`harness/`) — the autonomous pipeline. Docker + ASAN,
   executes target code, needs a sandbox (see `docs/security.md`). Route here
   when the user wants to actually find and verify crashes.
@@ -212,8 +213,10 @@ touches the grade container — defeats reward-hacking via pre-positioned state.
 **The agent runs inside the sandbox, not on the host.** `bin/vp-sandboxed`
 sets the runtime/proxy env and execs the pipeline; each find/grade/report
 agent then runs `claude -p` inside its own gVisor container (`--runtime=runsc
---network=vp-internal`, egress = `api.anthropic.com:443` via the allowlist
-proxy). The agent's `Read`/`Write`/`Bash` are confined to that container.
+--network=vp-internal`, egress = the configured allowlist via the proxy —
+default `api.anthropic.com:443`; see docs/agent-sandbox.md for
+Bedrock/Vertex). The agent's `Read`/`Write`/`Bash` are confined to that
+container.
 Agent-spawning subcommands refuse to start outside the sandbox unless
 `--dangerously-no-sandbox` is passed.
 
@@ -222,6 +225,12 @@ Agent-spawning subcommands refuse to start outside the sandbox unless
 the prompt, one short call each. No MCP, no web access.
 
 ## Gotchas
+
+**Agent API requests carry a usage marker** (`anthropic-cyber-runbook` header + a
+`cyber-runbook/` User-Agent token, 1P auth only). `VULN_PIPELINE_NO_TELEMETRY=1`
+removes the pipeline marker; interactive sessions get a header-only marker
+from `.claude/settings.json` instead (override in `.claude/settings.local.json`).
+See `docs/pipeline.md#usage-marker`.
 
 **`-e CLAUDECODE=` and `-e IS_SANDBOX=1` in `agent.py` are load-bearing.**
 The first stops the in-container CLI's nested-session check; the second lets

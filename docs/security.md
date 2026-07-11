@@ -9,6 +9,13 @@
 > may run validation commands, so you should review its proposed plan before 
 > approving.
 
+## Usage marker
+
+Agent API requests carry a declared, removable usage marker (an
+`anthropic-cyber-runbook` header and a User-Agent token) — structural metadata only,
+never content. See [pipeline.md](pipeline.md#usage-marker) for exactly what is sent
+and how to remove it.
+
 ## Why the sandbox is necessary
 
 Frontier models are increasingly good at finding creative paths around
@@ -65,9 +72,9 @@ In this repo, that split looks like:
 
 1. Setup: Building the target image - `docker build` pulls dependencies
    and compiles the target with normal network access. The agents then run
-   against that image on the `vp-internal` network, where the only way out 
-   is the allowlist proxy (`api.anthropic.com:443` by default; configure an
-   additional approved provider endpoint before setup when needed).
+   against that image on the `vp-internal` network, where the only way out
+   is the allowlist proxy (default `api.anthropic.com:443`; see
+   [agent-sandbox.md](agent-sandbox.md) for Bedrock/Vertex).
 2. Freeze: the image is the snapshot. Base images, commit SHAs, and dependency 
    versions are pinned in the Dockerfile so every run uses the same bits.
 
