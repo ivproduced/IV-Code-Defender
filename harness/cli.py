@@ -73,9 +73,9 @@ def _resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
       1. ANTHROPIC_API_KEY            — long-lived key
       2. CLAUDE_CODE_OAUTH_TOKEN      — subscription-plan token
 
-    Bedrock/Vertex authenticate through the cloud SDK env (AWS_*/GCP creds);
-    extra egress hosts are appended to VULN_PIPELINE_EXTRA_EGRESS so the proxy
-    allowlist permits the regional endpoint.
+    Bedrock/Vertex authenticate through the cloud SDK env (AWS_*/GCP creds).
+    When their regional endpoints need allowlisting, setup guidance is printed
+    for VP_EGRESS_ALLOW.
     """
     prov = providers.resolve_provider(provider)
     penv = providers.resolve_provider_env(prov)
