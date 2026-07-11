@@ -59,6 +59,7 @@ def run(
     name: str,
     network: str = "none",
     memory: str = "4g",
+    pids_limit: int = 512,
     shm_size: str | None = None,
     shell: str = "/bin/bash",
     runtime: str | None = None,
@@ -76,6 +77,13 @@ def run(
     extra: list[str] = []
     if runtime:
         extra += ["--runtime", runtime]
+    # Agent containers execute attacker-influenced targets and receive model
+    # instructions. Keep the OCI boundary least-privileged even under gVisor.
+    extra += [
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true",
+        "--pids-limit", str(pids_limit),
+    ]
     if shm_size:
         extra += ["--shm-size", shm_size]
     for k, v in (env or {}).items():
