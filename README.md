@@ -45,8 +45,8 @@ git clone https://github.com/ivproduced/IV-Code-Defender.git
 cd IV-Code-Defender
 claude
 
-# Get a short overview and guided canary run
-> /quickstart
+# In the Claude Code prompt, run:
+/quickstart
 ```
 
 The interactive skills read and write artifacts in the selected repository.
