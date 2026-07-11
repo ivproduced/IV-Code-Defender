@@ -226,3 +226,19 @@ def test_format_report_shows_status(tmp_path):
 
 def test_format_report_empty():
     assert format_report({}) == "No crashes found.\n"
+
+
+def test_signature_tolerates_partial_reason():
+    crash = {"crash_output": "x", "reason": {"operation": "memcpy"}}
+
+    assert _signature(crash) == ("unknown", "<no-frame>")
+
+
+def test_signature_falls_back_to_top_level_crash_type():
+    crash = {
+        "crash_output": "x",
+        "reason": {"operation": "memcpy"},
+        "crash_type": "heap-use-after-free",
+    }
+
+    assert _signature(crash)[0] == "heap-use-after-free"

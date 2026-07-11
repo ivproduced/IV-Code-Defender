@@ -28,7 +28,11 @@ NO_FRAME = "<no-frame>"
 
 def _signature(crash: dict) -> tuple[str, str]:
     reason = crash.get("reason") or crash_reason(crash.get("crash_output") or "")
-    crash_type = reason["crash_type"] or crash.get("crash_type") or "unknown"
+    crash_type = (
+        (reason or {}).get("crash_type")
+        or crash.get("crash_type")
+        or "unknown"
+    )
     frame = top_frame(crash.get("crash_output") or "")
     return (crash_type, frame or NO_FRAME)
 
