@@ -146,6 +146,8 @@ bin/vp-sandboxed patch <results_dir> --no-reattack                 # skip the re
 bin/vp-sandboxed patch <results_dir> --style                       # run the optional, advisory style judge
 bin/vp-sandboxed patch <results_dir> --max-iterations N            # maximum number of patch loops (default 5)
 bin/vp-sandboxed patch <results_dir> --max-turns N                 # per-iteration agent budget (default 200)
+bin/vp-sandboxed patch <results_dir> --provider <provider>         # select anthropic, bedrock, or vertex
+bin/vp-sandboxed patch <results_dir> --engagement-context <file>   # provide an authorization scope to every agent
 ```
 
 ## Harness-driven re-attack

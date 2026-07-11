@@ -17,7 +17,7 @@ gVisor container alongside the target binary and source.
 | -------------------- | --------------------- | ------------------------------------------------------ |
 | Agent `Read`/`Write` | host filesystem       | container filesystem only                              |
 | Agent `Bash`         | host shell            | container shell only (gVisor netstack/kernel)          |
-| Network egress       | whatever the host has | `api.anthropic.com:443` only                           |
+| Network egress       | whatever the host has | selected model endpoint only, via allowlist proxy       |
 | Host coupling        | full                  | `docker exec cat` PoC out, `-v found_bugs.jsonl:ro` in |
 
 gVisor provides the isolation between the agent and your machine. The agent's
@@ -70,8 +70,8 @@ deliberately rejected because this harness depends on a host-installed gVisor
 runtime and reliable cgroup/memory behavior.
 
 ```bash
-# Set this before setup if using Bedrock/Vertex or another endpoint.
-export VP_EGRESS_ALLOW="api.anthropic.com:443,bedrock-runtime.us-east-1.amazonaws.com:443"
+# Set this before setup if using Bedrock, Vertex, or another endpoint.
+export VP_EGRESS_ALLOW="api.anthropic.com:443,bedrock-runtime.us-east-1.amazonaws.com:443,bedrock.us-east-1.amazonaws.com:443"
 ./scripts/setup_podman_sandbox.sh
 
 # sudo -E preserves ANTHROPIC_*, AWS_*, and provider environment variables.
@@ -84,12 +84,14 @@ uses `runsc` per container, creates the same internal `vp-internal` network and
 allowlist proxy as Docker, then validates gVisor, filesystem isolation, and
 network egress. Use `scripts/setup_sandbox.sh` for Docker.
 
-The proxy only allows traffic to `api.anthropic.com:443` by default,
-so if your API traffic goes elsewhere (i.e., you use a non-default
-`ANTHROPIC_BASE_URL`) it will be blocked. To override the default, set 
-`VP_EGRESS_ALLOW=host-1:443,host-2:443` (as a comma separated list)
-before running the script. If you need to change this allowlist later,
-re-run the script to create the proxy with the new value.
+The proxy only allows traffic to `api.anthropic.com:443` by default. Before
+using a custom Anthropic endpoint, Bedrock, or Vertex, set
+`VP_EGRESS_ALLOW=host-1:443,host-2:443` as a comma-separated allowlist before
+running the setup script. Bedrock needs both
+`bedrock-runtime.<region>.amazonaws.com:443` and
+`bedrock.<region>.amazonaws.com:443`; Vertex needs
+`<region>-aiplatform.googleapis.com:443`. If you need to change this
+allowlist later, re-run the script to recreate the proxy.
 
 The script downloads a pinned `runsc` release. Set `RUNSC_RELEASE=<yyyymmdd>`
 to use a different one.

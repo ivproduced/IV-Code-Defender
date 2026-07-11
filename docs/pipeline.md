@@ -6,9 +6,9 @@ the pipeline does, how to watch a run, and relevant CLI flags.
 
 > ⚠️ **The pipeline spawns autonomous agents and executes target code.** 
 > The pipeline runs each agent inside a gVisor container with egress restricted 
-> to the Claude API. Agent-spawning subcommands refuse to start outside it unless 
-> explicitly overridden. For more information, see [docs/security.md](docs/security.md)
-> and [docs/agent-sandbox.md](docs/agent-sandbox.md).
+> to the selected model provider. Agent-spawning subcommands refuse to start outside it unless
+> explicitly overridden. For more information, see [security.md](security.md)
+> and [agent-sandbox.md](agent-sandbox.md).
 
 > This document covers how the reference pipeline works. For the general
 > best practices it implements, see the [blog post](blog-post.md).
@@ -26,6 +26,11 @@ bin/vp-sandboxed run drlibs --model <model-id> --runs 3 --parallel --stream --au
 # Generate a candidate patch for each finding
 bin/vp-sandboxed patch results/drlibs/<timestamp>/ --model <model-id>
 ```
+
+The default provider is the Anthropic API. Amazon Bedrock and Google Vertex
+are also supported: pass `--provider bedrock` or `--provider vertex` (or set
+`VULN_PIPELINE_PROVIDER`) and configure the corresponding credentials and
+egress allowlist described in [agent-sandbox.md](agent-sandbox.md#podman).
 
 Start with a small wave like this one to get a feel for how the pipeline works
 and the token burn before scaling up. Results land in `results/<target>/<timestamp>/`.
@@ -84,6 +89,9 @@ observed re-runs) rather than plausible prose. Reports land in `reports/bug_NN/r
 and include the grader's score so you can tell which reports are most trustworthy.
 The `--novelty` modifier (off by default) lets the orchestrator check the upstream
 git history so the report can include whether the bug has already been fixed there.
+Each completed report also carries a CWE and NIST SP 800-53 Rev. 5 mapping.
+Run `bin/vp-sandboxed oscal <results-dir>` to aggregate those mappings into
+an OSCAL assessment-results document.
 
 **Dedup.** A separate command that can be run post-hoc to cluster the pipeline
 results by ASAN signature. It's useful for a quick summary of "these N crashes
@@ -127,10 +135,16 @@ bin/vp-sandboxed report results/<target>/<ts>/           # batch-mode reports, f
 bin/vp-sandboxed report results/<target>/<ts>/ --fresh   # redo reports, ignoring existing report.json checkpoints
 bin/vp-sandboxed patch  results/<target>/<ts>/           # propose and verify a fix per unique bug
 bin/vp-sandboxed dedup  results/<target>/<ts>/           # group crashes by signature
+bin/vp-sandboxed oscal  results/<target>/<ts>/           # emit <results-dir>/oscal.json
 ```
 
 > This reference includes the most commonly used flags. For the full set of
 > flags, use `--help` on any subcommand.
+
+`run`, `recon`, `report`, and `patch` accept `--provider` (or use
+`VULN_PIPELINE_PROVIDER`); the model still comes from `--model` or
+`VULN_PIPELINE_MODEL`. `--engagement-context` is accepted by the
+agent-spawning commands when you need to supply a written authorization scope.
 
 ## Design principles
 
