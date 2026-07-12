@@ -108,7 +108,9 @@ review before adoption.
 Read [Security](docs/security.md) and [Agent sandbox](docs/agent-sandbox.md)
 before running targets outside the supplied examples.
 
-For deployment in a federal environment, see [Federal deployment](docs/federal-deployment.md).
+For deployment in a federal environment, see [Federal deployment](docs/federal-deployment.md),
+including its [plain-language agent execution overview](docs/federal-deployment.md#plain-language-agent-execution-overview)
+for assessors and other non-technical reviewers.
 
 ## Customize for your codebase
 
