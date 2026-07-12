@@ -134,6 +134,7 @@ guide.
 - [Patching](docs/patching.md): patch-generation verification ladder
 - [Security](docs/security.md): safe operating requirements
 - [Agent sandbox](docs/agent-sandbox.md): gVisor isolation and egress policy
+- [Identity and agent access policy](docs/identity-and-agent-access-policy.md): proposed IIQ, CyberArk, AD, Linux, and agent-identity control baseline
 - [Troubleshooting](docs/troubleshooting.md): common setup and runtime issues
 - [Targets](targets/README.md): built-in targets and target configuration
 
