@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Data contracts for the find→grade pipeline.
 
-CrashArtifact is the pivot: find emits it, grade consumes it.
+CrashArtifact is the backward-compatible finding pivot: it carries either an
+ASAN PoC or a replay manifest and evidence bundle.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class CrashArtifact:
-    """A crash the find-agent claims to have produced. Not yet verified."""
+    """A finding the find-agent claims to have produced. Not yet verified."""
     poc_path: str              # path inside the find-container, e.g. /tmp/poc.bin
     poc_bytes: bytes           # PoC file contents — bytes, inputs are often binary
     reproduction_command: str  # exact command, e.g. "/work/entry /tmp/poc.bin"
@@ -22,6 +23,10 @@ class CrashArtifact:
     crash_output: str          # ASAN trace / stderr, truncated to 10K chars
     exit_code: int             # e.g. 134 (SIGABRT from ASAN)
     dup_check: str | None = None  # agent's reasoning that this isn't a known dup
+    profile: str = "cpp_asan"
+    replay_manifest: dict[str, Any] | None = None
+    evidence_bundle: dict[str, Any] | None = None
+    detection_signal: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -38,6 +43,10 @@ class CrashArtifact:
             crash_output=d["crash_output"],
             exit_code=d["exit_code"],
             dup_check=d.get("dup_check"),
+            profile=d.get("profile", "cpp_asan"),
+            replay_manifest=d.get("replay_manifest"),
+            evidence_bundle=d.get("evidence_bundle"),
+            detection_signal=d.get("detection_signal"),
         )
 
 

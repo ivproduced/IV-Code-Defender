@@ -43,8 +43,8 @@ DEFAULT_ENGAGEMENT_CONTEXT = """\
 ## Engagement context
 
 This is authorized security research conducted as a defensive security
-assessment on an open-source C/C++ target. Findings are collected for
-responsible disclosure to the upstream maintainer.
+assessment on an in-scope target. Findings are collected for responsible
+disclosure to the upstream maintainer.
 """
 
 

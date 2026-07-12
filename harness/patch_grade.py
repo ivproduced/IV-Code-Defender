@@ -28,6 +28,7 @@ from .artifacts import CrashArtifact, PatchVerdict
 from .asan import project_frames
 from .config import TargetConfig
 from .find import run_find
+from .profiles import is_web
 from .prompts.patch_prompt import build_style_judge_prompt
 
 REATTACK_MAX_TURNS = 50
@@ -145,10 +146,16 @@ async def grade_patch(
 
             # ── T1: PoC stops ────────────────────────────────────────────────────
             s = time.time()
+            artifact_name = "replay.json" if is_web(target.profile) else "poc.bin"
+            workspace_artifact = f"/tmp/{artifact_name}"
             await asyncio.to_thread(
-                docker_ops.write_file, container, "/tmp/poc.bin", crash.poc_bytes
+                docker_ops.write_file, container, workspace_artifact, crash.poc_bytes
             )
-            adapted = crash.reproduction_command.replace(crash.poc_path, "/tmp/poc.bin")
+            adapted = (
+                f"{target.replay_command} {workspace_artifact}"
+                if is_web(target.profile)
+                else crash.reproduction_command.replace(crash.poc_path, workspace_artifact)
+            )
             try:
                 rc, out, err = await asyncio.to_thread(
                     docker_ops.exec_sh, container, adapted, timeout=600
@@ -160,7 +167,7 @@ async def grade_patch(
                     "timed out after 600s (hang — likely a botched loop bound)",
                 )
             timings["t1"] = time.time() - s
-            t1 = _t1_passes(rc, out, err)
+            t1 = _t1_passes(rc, out, err, target.profile, target.detection_signal)
             if not t1:
                 evidence["t1"] = _clip(f"[poc] rc={rc}\n{err or out}")
                 return _verdict(t0, t1, t2, re_clean, t3, evidence, timings)
@@ -241,7 +248,15 @@ async def grade_patch(
 # ── tier oracles ─────────────────────────────────────────────────────────────
 
 
-def _t1_passes(rc: int, stdout: str, stderr: str) -> bool:
+def _t1_passes(
+    rc: int,
+    stdout: str,
+    stderr: str,
+    profile: str = "cpp_asan",
+    detection_signal: str | None = None,
+) -> bool:
+    if is_web(profile):
+        return rc == 0 and bool(detection_signal) and detection_signal not in (stdout + stderr)
     return rc == 0 and "AddressSanitizer:" not in (stdout + stderr)
 
 

@@ -57,6 +57,19 @@ def test_signature_missing_fields():
     assert _signature({"crash_type": None, "crash_output": None}) == ("unknown", NO_FRAME)
 
 
+def test_signature_web_uses_finding_type_and_endpoint():
+    crash = {
+        "profile": "node_web",
+        "crash_type": "idor",
+        "evidence_bundle": {
+            "kind": "http",
+            "requests": [{"method": "GET", "path": "/api/users/42"}],
+            "responses": [{"status": 200}],
+        },
+    }
+    assert _signature(crash) == ("idor", "/api/users/42")
+
+
 # ── dedup (results tree walk) ────────────────────────────────────────────────
 
 def _write_result(path, status, crash_type=None, crash_output=None):

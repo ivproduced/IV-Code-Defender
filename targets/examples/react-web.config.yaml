@@ -1,0 +1,10 @@
+# Template only: /opt/vp/replay owns local dev server and browser automation.
+profile: react_web
+image_tag: my-react-web:latest
+github_url: https://github.com/example/react-web
+commit: <pinned-commit>
+binary_path: /opt/vp/replay
+source_root: /work/app
+replay_command: /opt/vp/replay
+detection_signal: VULNERABILITY_DETECTED
+attack_surface: Browser routes and API calls exposed by the shipped application.

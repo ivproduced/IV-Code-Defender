@@ -42,3 +42,30 @@ def test_load_accepts_safe_absolute_container_paths(tmp_path):
 def test_load_rejects_unsafe_path_like_fields(tmp_path, field, value):
     with pytest.raises(ValueError, match=field):
         TargetConfig.load(_write_config(tmp_path, **{field: value}))
+
+
+def test_web_profile_requires_safe_replay_contract(tmp_path):
+    cfg = TargetConfig.load(_write_config(
+        tmp_path,
+        profile="python_web",
+        replay_command="/opt/vp/replay --manifest",
+        detection_signal="VULNERABILITY_DETECTED",
+    ))
+
+    assert cfg.profile == "python_web"
+    assert cfg.replay_command == "/opt/vp/replay --manifest"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"profile": "unknown"},
+        {"profile": "python_web", "replay_command": "/work/src/replay", "detection_signal": "FOUND"},
+        {"profile": "node_web", "replay_command": "/work/replay; id", "detection_signal": "FOUND"},
+        {"profile": "react_web", "replay_command": "/work/replay"},
+        {"profile": "python_web", "replay_command": "/work/replay", "detection_signal": "x" * 257},
+    ],
+)
+def test_web_profile_rejects_invalid_contract(tmp_path, overrides):
+    with pytest.raises(ValueError):
+        TargetConfig.load(_write_config(tmp_path, **overrides))

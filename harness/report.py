@@ -19,8 +19,12 @@ from . import docker_ops, sandbox
 from .agent import run_agent, parse_xml_tag, AgentResult
 from .artifacts import CrashArtifact, ReportVerdict
 from .config import TargetConfig
-from .prompts.report_prompt import build_report_prompt
-from .prompts.report_grader_prompt import build_report_grader_prompt
+from .profiles import (
+    build_report_grader_prompt,
+    build_report_prompt,
+    get_profile,
+    is_web,
+)
 
 
 REPORT_MAX_TURNS = 200
@@ -63,23 +67,18 @@ async def run_report(
         )
 
     with sandbox.agent_container(target.image_tag, container_name, agent_env) as container:
-        docker_ops.write_file(container, "/tmp/poc.bin", crash.poc_bytes)
-        adapted_cmd = crash.reproduction_command.replace(crash.poc_path, "/tmp/poc.bin")
+        artifact_name = "replay.json" if is_web(target.profile) else "poc.bin"
+        workspace_artifact = f"/tmp/{artifact_name}"
+        docker_ops.write_file(container, workspace_artifact, crash.poc_bytes)
+        adapted_cmd = crash.reproduction_command.replace(crash.poc_path, workspace_artifact)
 
         os.makedirs(workspace_dir, exist_ok=True)
-        with open(os.path.join(workspace_dir, "poc.bin"), "wb") as f:
+        with open(os.path.join(workspace_dir, artifact_name), "wb") as f:
             f.write(crash.poc_bytes)
 
         prompt = build_report_prompt(
-            github_url=target.github_url,
-            commit=target.commit,
-            source_root=target.source_root,
-            binary_path=target.binary_path,
-            reproduction_command=adapted_cmd,
-            crash_output=crash.crash_output,
-            attack_surface=target.attack_surface,
-            upstream_log=upstream_log,
-            crash_file=crash_file,
+            target=target, crash=crash, adapted_command=adapted_cmd,
+            upstream_log=upstream_log, crash_file=crash_file,
         )
 
         t0 = time.time()
@@ -106,6 +105,7 @@ async def run_report(
             image_tag=target.image_tag, agent_env=agent_env,
             container_name=f"{container_name}_grader",
             novelty_checked=upstream_log is not None,
+            profile=target.profile,
             progress_prefix=progress_prefix,
             transcript_path=grader_transcript,
         )
@@ -119,6 +119,7 @@ async def grade_report(
     agent_env: dict[str, str] | None,
     container_name: str = "report_grader",
     novelty_checked: bool = False,
+    profile: str = "cpp_asan",
     progress_prefix: str | None = None,
     transcript_path: str | None = None,
 ) -> ReportVerdict:
@@ -126,7 +127,7 @@ async def grade_report(
 
     Fresh container — the grader must not see any state the report-agent
     left behind (same trust boundary as find→grade)."""
-    prompt = build_report_grader_prompt(report_text)
+    prompt = build_report_grader_prompt(profile, report_text)
     with sandbox.agent_container(image_tag, container_name, agent_env) as container:
         result = await run_agent(
             prompt=prompt,
@@ -137,13 +138,18 @@ async def grade_report(
             transcript_path=transcript_path,
             tools=[],
         )
-    return _parse_grader(result.find_tagged_message("score_primitive"),
-                         novelty_checked=novelty_checked)
+    first_section = get_profile(profile).report_sections[0]
+    return _parse_grader(
+        result.find_tagged_message(f"score_{first_section}"),
+        novelty_checked=novelty_checked, profile=profile,
+    )
 
 
-def _parse_grader(text: str, novelty_checked: bool) -> ReportVerdict:
+def _parse_grader(
+    text: str, novelty_checked: bool, profile: str = "cpp_asan",
+) -> ReportVerdict:
     section_scores: dict[str, int] = {}
-    for s in _SECTIONS:
+    for s in get_profile(profile).report_sections:
         section_scores[s] = _parse_score_tag(text, f"score_{s}", allowed=(0, 1, 2))
     rubric = sum(section_scores.values())
     bonus = _parse_score_tag(text, "escalation_bonus", allowed=(0, 1, 2, 4))

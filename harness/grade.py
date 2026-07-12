@@ -17,7 +17,7 @@ from . import docker_ops, sandbox
 from .agent import run_agent, parse_xml_tag, AgentResult
 from .artifacts import CrashArtifact, GraderVerdict
 from .config import TargetConfig
-from .prompts.grade_prompt import build_grade_prompt
+from .profiles import build_grade_prompt, is_web
 
 
 GRADE_MAX_TURNS = 50
@@ -52,22 +52,18 @@ async def run_grade(
     with sandbox.agent_container(target.image_tag, container_name, agent_env) as container:
         # Only the PoC bytes cross the boundary. Substitute the path: the
         # find-agent saved to some arbitrary path; we write to a fixed one.
-        docker_ops.write_file(container, "/tmp/poc.bin", crash.poc_bytes)
-        adapted_cmd = crash.reproduction_command.replace(crash.poc_path, "/tmp/poc.bin")
+        artifact_name = "replay.json" if is_web(target.profile) else "poc.bin"
+        workspace_artifact = f"/tmp/{artifact_name}"
+        docker_ops.write_file(container, workspace_artifact, crash.poc_bytes)
+        adapted_cmd = crash.reproduction_command.replace(crash.poc_path, workspace_artifact)
 
         os.makedirs(workspace_dir, exist_ok=True)
-        workspace_poc = os.path.join(workspace_dir, "poc.bin")
-        with open(workspace_poc, "wb") as f:
+        with open(os.path.join(workspace_dir, artifact_name), "wb") as f:
             f.write(crash.poc_bytes)
 
         prompt = build_grade_prompt(
-            image_tag=target.image_tag,
-            reproduction_command=crash.reproduction_command,
-            reproduction_command_adapted=adapted_cmd,
-            crash_type=crash.crash_type,
-            exit_code=crash.exit_code,
-            source_root=target.source_root,
-            workspace_poc="/tmp/poc.bin",
+            target=target, crash=crash, adapted_command=adapted_cmd,
+            workspace_artifact=workspace_artifact,
         )
         t0 = time.time()
         result = await run_agent(

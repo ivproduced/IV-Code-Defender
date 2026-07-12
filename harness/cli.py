@@ -50,6 +50,7 @@ from .dedup import dedup
 from .find import run_find, DEFAULT_FIND_MAX_TURNS
 from .grade import run_grade
 from .judge import run_judge, run_compare
+from .profiles import is_web
 from .novelty import upstream_log, crash_file_from_frame, NOVELTY_NOT_CHECKED
 from .patch import run_patch, PATCH_MAX_TURNS, DEFAULT_MAX_ITERATIONS
 from .recon import run_recon, RECON_MAX_TURNS
@@ -231,7 +232,8 @@ def _write_result(out_dir: Path, result: RunResult) -> None:
 
     # PoC bytes if we have them
     if result.crash:
-        with open(out_dir / "poc.bin", "wb") as f:
+        artifact_name = "replay.json" if is_web(result.crash.profile) else "poc.bin"
+        with open(out_dir / artifact_name, "wb") as f:
             f.write(result.crash.poc_bytes)
 
     # result.json — strip transcripts to keep it readable (they're in the JSONLs)
@@ -242,7 +244,10 @@ def _write_result(out_dir: Path, result: RunResult) -> None:
     # operation. Sits alongside the agent-emitted crash_type so downstream
     # consumers can cross-check (the agent tag is free-text and fragments).
     if result.crash:
-        slim["crash"]["reason"] = crash_reason(result.crash.crash_output)
+        if is_web(result.crash.profile):
+            slim["crash"]["evidence_excerpt"] = _evidence_excerpt(result.crash)
+        else:
+            slim["crash"]["reason"] = crash_reason(result.crash.crash_output)
     with open(out_dir / "result.json", "w") as f:
         json.dump(slim, f, indent=2)
 
@@ -428,7 +433,7 @@ async def _stream_dispatch(
     happens outside the lock (the slow part)."""
     reports_root: Path = ctx["reports_root"]
     reports_root.mkdir(parents=True, exist_ok=True)
-    excerpt = asan_excerpt(crash.crash_output)
+    excerpt = _evidence_excerpt(crash)
 
     async with ctx["lock"]:
         manifest = _read_manifest(reports_root)
@@ -443,6 +448,7 @@ async def _stream_dispatch(
             transcript_path=str(reports_root / f"judge_run{run_idx:03d}.jsonl"),
             progress_prefix=f"[judge:{run_idx}]",
             system_prompt=ctx["system_prompt"],
+            profile=target.profile,
         )
         _jline = (f"[judge:{run_idx}] {jv.judgment} in {elapsed:.1f}s"
                   + (f" → bug_{jv.bug_id:02d}" if jv.bug_id is not None else ""))
@@ -454,7 +460,7 @@ async def _stream_dispatch(
 
         if jv.judgment == "NEW":
             bug_id = _next_bug_id(manifest)
-            _append_manifest(reports_root, bug_id, run_idx, excerpt)
+            _append_manifest(reports_root, bug_id, run_idx, excerpt, target.profile)
         else:  # DUP_BETTER
             bug_id = jv.bug_id
             assert bug_id is not None  # _parse_judge enforces
@@ -531,7 +537,9 @@ async def _stream_report(
     frame = top_frame(crash.crash_output) or ""
     crash_file = crash_file_from_frame(frame)
     log = None
-    if novelty:
+    # Web replay evidence has no trustworthy source-file attribution yet. Never
+    # turn an empty path into an arbitrary upstream-file novelty result.
+    if novelty and not is_web(target.profile):
         print(f"[report:{run_idx}→bug_{bug_id:02d}] novelty: fetching upstream log for {crash_file or '?'} ...")
         log = upstream_log(target.github_url, target.commit,
                            crash_file or "", max_bytes=2000)
@@ -600,6 +608,20 @@ def _assigned_focus(i: int, focus_areas: list[str]) -> str | None:
 
 # ── found_bugs.jsonl: runtime bug-sharing ───────────────────────────────────────
 
+
+def _evidence_excerpt(crash: CrashArtifact) -> str:
+    if not is_web(crash.profile):
+        return asan_excerpt(crash.crash_output)
+    evidence = crash.evidence_bundle or {}
+    if not evidence and crash.replay_manifest:
+        evidence = crash.replay_manifest.get("evidence") or {}
+    signal = crash.detection_signal or ""
+    return json.dumps(
+        {"finding_type": crash.crash_type, "evidence": evidence, "detection_signal": signal},
+        sort_keys=True,
+    )[:4000]
+
+
 def _seed_found_bugs(path: Path, known_bugs: list[str]) -> None:
     """Seed the jsonl with config known_bugs so a mid-run `cat` is a
     complete view, not just peer discoveries. System-prompt attention fades
@@ -614,10 +636,8 @@ def _append_found(path: Path, crash: CrashArtifact, run_idx: int) -> None:
     # signature themselves; the pipeline doesn't pre-canonicalize crash_type or
     # top_frame anymore (that was a fragility point — adjacent lines, format
     # variance, free-text agent tags all fragmented the dedup).
-    entry = {
-        "run_idx": run_idx,
-        "asan_excerpt": asan_excerpt(crash.crash_output),
-    }
+    entry = {"run_idx": run_idx}
+    entry["evidence_excerpt" if is_web(crash.profile) else "asan_excerpt"] = _evidence_excerpt(crash)
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
@@ -635,7 +655,7 @@ def _read_found_summaries(path: Path) -> list[str]:
         except json.JSONDecodeError:
             continue
         # Config-seeded entries are prose; runtime entries carry ASAN excerpts.
-        out.append(d.get("asan_excerpt") or d.get("summary") or "")
+        out.append(d.get("asan_excerpt") or d.get("evidence_excerpt") or d.get("summary") or "")
     return [s for s in out if s]
 
 
@@ -674,11 +694,12 @@ def _next_bug_id(entries: list[dict]) -> int:
 
 
 def _append_manifest(reports_root: Path, bug_id: int, run_idx: int,
-                     excerpt: str) -> None:
+                     excerpt: str, profile: str = "cpp_asan") -> None:
     reports_root.mkdir(parents=True, exist_ok=True)
     with open(reports_root / "manifest.jsonl", "a") as f:
         f.write(json.dumps({
-            "bug_id": bug_id, "run_idx": run_idx, "asan_excerpt": excerpt,
+            "bug_id": bug_id, "run_idx": run_idx, "profile": profile,
+            ("evidence_excerpt" if is_web(profile) else "asan_excerpt"): excerpt,
         }) + "\n")
 
 
@@ -1182,7 +1203,7 @@ async def _report_one(
 
     crash_file = crash_file_from_frame(frame)
     log = None
-    if args.novelty:
+    if args.novelty and not is_web(target.profile):
         print(f"[report:{idx}] novelty: fetching upstream log for {crash_file or '?'} ...")
         log = upstream_log(target.github_url, target.commit,
                            crash_file or "", max_bytes=2000)
