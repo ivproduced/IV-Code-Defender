@@ -1,0 +1,10 @@
+# Template only: /opt/vp/replay starts and stops the Node service for one manifest.
+profile: node_web
+image_tag: my-node-web:latest
+github_url: https://github.com/example/node-web
+commit: <pinned-commit>
+binary_path: /opt/vp/replay
+source_root: /work/app
+replay_command: /opt/vp/replay
+detection_signal: VULNERABILITY_DETECTED
+attack_surface: Public and authenticated HTTP routes served by the production app.

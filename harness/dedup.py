@@ -27,6 +27,12 @@ NO_FRAME = "<no-frame>"
 
 
 def _signature(crash: dict) -> tuple[str, str]:
+    if crash.get("profile") in {"python_web", "node_web", "react_web"}:
+        evidence = crash.get("evidence_bundle") or {}
+        if not evidence and isinstance(crash.get("replay_manifest"), dict):
+            evidence = crash["replay_manifest"].get("evidence") or {}
+        endpoint = _web_location(evidence)
+        return (crash.get("crash_type") or "web-finding", endpoint or NO_FRAME)
     reason = crash.get("reason") or crash_reason(crash.get("crash_output") or "")
     crash_type = (
         (reason or {}).get("crash_type")
@@ -35,6 +41,23 @@ def _signature(crash: dict) -> tuple[str, str]:
     )
     frame = top_frame(crash.get("crash_output") or "")
     return (crash_type, frame or NO_FRAME)
+
+
+def _web_location(evidence: object) -> str | None:
+    """Stable web dedup key: finding class plus the attacked endpoint or page."""
+    if not isinstance(evidence, dict):
+        return None
+    if evidence.get("kind") == "http":
+        requests = evidence.get("requests")
+        if isinstance(requests, list) and requests and isinstance(requests[0], dict):
+            location = requests[0].get("path") or requests[0].get("url")
+            return location if isinstance(location, str) else None
+    if evidence.get("kind") == "browser":
+        steps = evidence.get("steps")
+        if isinstance(steps, list) and steps and isinstance(steps[0], dict):
+            location = steps[0].get("url") or steps[0].get("route")
+            return location if isinstance(location, str) else None
+    return None
 
 
 def dedup(results_root: Path) -> dict[tuple[str, str], list[tuple[Path, str, dict]]]:

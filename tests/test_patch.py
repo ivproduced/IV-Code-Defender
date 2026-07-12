@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from harness.agent import AgentResult
 from harness.artifacts import PatchVerdict
@@ -90,6 +90,7 @@ def test_run_patch_happy_path(tmp_path):
     r = json.loads((tmp_path / "patch_result.json").read_text())
     assert r["iterations"] == 1
     assert r["rationale"] == "clamped len"
+    mdocker.write_file.assert_any_call(ANY, "/tmp/poc.bin", ALPHA_CRASH.poc_bytes)
 
 
 def test_run_patch_retries_on_failed_grade(tmp_path):

@@ -1,6 +1,6 @@
 # Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
-"""Build the per-target agent image: target binary + claude CLI.
+"""Build the per-target agent image: target runtime + claude CLI.
 
 The agent runs *inside* its container, so the container needs the CLI. To
 avoid one node+npm install per target, ``ensure()`` builds a shared
@@ -71,9 +71,16 @@ def ensure(target_tag: str) -> str:
     tag = agent_tag(target_tag)
     if docker_ops.image_exists(tag):
         return tag
-    _ensure_base()
     _build(
-        f"FROM {BASE_TAG}\nCOPY --from={target_tag} /work /work\n",
+        textwrap.dedent(f"""\
+            FROM {target_tag}
+            USER root
+            RUN apt-get update && \\
+                apt-get install -y --no-install-recommends nodejs npm ca-certificates xxd gdb && \\
+                rm -rf /var/lib/apt/lists/* && \\
+                npm install -g @anthropic-ai/claude-code@{CLAUDE_CODE_VERSION}
+            WORKDIR /work
+        """),
         tag,
     )
     subprocess.run(

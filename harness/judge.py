@@ -13,7 +13,8 @@ import time
 from . import sandbox
 from .agent import run_agent, parse_xml_tag, AgentResult
 from .artifacts import JudgeVerdict
-from .prompts.judge_prompt import build_judge_prompt, build_compare_prompt
+from .prompts.judge_prompt import build_compare_prompt
+from .profiles import build_judge_prompt
 
 
 JUDGE_MAX_TURNS = 20
@@ -36,6 +37,7 @@ async def run_judge(
     transcript_path: str | None = None,
     progress_prefix: str | None = None,
     system_prompt: str | None = None,
+    profile: str = "cpp_asan",
 ) -> tuple[JudgeVerdict, AgentResult, float]:
     """Decide whether a freshly-graded crash warrants a report.
 
@@ -43,7 +45,8 @@ async def run_judge(
     judgment, defaults to NEW — fail open so crashes aren't silently dropped.
     """
     prompt = build_judge_prompt(
-        asan_excerpt=asan_excerpt,
+        profile=profile,
+        evidence_excerpt=asan_excerpt,
         dup_check=dup_check or "",
         grade_status=grade_status,
         grade_score=grade_score,

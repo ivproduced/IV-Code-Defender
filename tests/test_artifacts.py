@@ -29,6 +29,26 @@ def test_crash_artifact_from_dict_missing_dup_check():
     assert CrashArtifact.from_dict(d).dup_check is None
 
 
+def test_web_artifact_roundtrip_preserves_replay_evidence():
+    manifest = {
+        "replay_command": "/opt/vp/replay /tmp/replay.json",
+        "evidence": {
+            "kind": "http", "requests": [{"method": "GET", "path": "/users/2"}],
+            "responses": [{"status": 200, "body": "other user's data"}],
+        },
+        "detection_signal": {"type": "response_marker", "value": "other user's data"},
+        "security_impact": "An authenticated user reads another user's profile.",
+    }
+    orig = CrashArtifact(
+        poc_path="/tmp/replay.json", poc_bytes=b'{"version": 1}',
+        reproduction_command=manifest["replay_command"], crash_type="idor",
+        crash_output="{}", exit_code=0, profile="python_web",
+        replay_manifest=manifest, evidence_bundle=manifest["evidence"],
+        detection_signal='{"type":"response_marker","value":"other user\\u0027s data"}',
+    )
+    assert CrashArtifact.from_dict(orig.to_dict()) == orig
+
+
 def test_grader_verdict_roundtrip():
     orig = GraderVerdict(
         passed=True,

@@ -21,7 +21,7 @@ from .agent import AgentResult, parse_xml_tag, run_agent
 from .artifacts import CrashArtifact, PatchVerdict
 from .config import TargetConfig
 from .patch_grade import grade_patch
-from .prompts.patch_prompt import build_patch_prompt
+from .profiles import build_patch_prompt, is_web
 
 PATCH_MAX_TURNS = 200
 DEFAULT_MAX_ITERATIONS = 5
@@ -73,9 +73,16 @@ async def run_patch(
         memory=target.memory_limit, shm_size=target.shm_size,
     ) as container:
         await asyncio.to_thread(
-            docker_ops.write_file, container, "/tmp/poc.bin", crash.poc_bytes
+            docker_ops.write_file,
+            container,
+            "/tmp/replay.json" if is_web(target.profile) else "/tmp/poc.bin",
+            crash.poc_bytes,
         )
-        adapted_cmd = crash.reproduction_command.replace(crash.poc_path, "/tmp/poc.bin")
+        adapted_cmd = (
+            f"{target.replay_command} /tmp/replay.json"
+            if is_web(target.profile)
+            else crash.reproduction_command.replace(crash.poc_path, "/tmp/poc.bin")
+        )
         # Ensure source_root is a git repo with a baseline commit so the
         # agent's `git diff` is deterministic. Gitignore the built binary so
         # the diff is source-only (otherwise the rebuilt binary lands in the
@@ -93,14 +100,8 @@ async def run_patch(
         for it in range(max_iterations):
             iterations = it + 1
             prompt = build_patch_prompt(
-                source_root=target.source_root,
-                binary_path=target.binary_path,
-                build_command=target.build_command,
-                test_command=target.test_command,
-                reproduction_command=adapted_cmd,
-                crash_output=crash.crash_output,
-                report_text=report_text,
-                retry_evidence=retry_evidence,
+                target=target, reproduction_command=adapted_cmd, crash=crash,
+                report_text=report_text, retry_evidence=retry_evidence,
             )
 
             t0 = time.time()

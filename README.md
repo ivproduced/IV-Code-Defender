@@ -3,7 +3,8 @@
 IVProduced Code Defender is an open-source security workflow for finding,
 verifying, prioritizing, and remediating vulnerabilities in source code. It
 combines interactive Claude Code skills for code review with an autonomous,
-sandboxed pipeline for execution-verified C and C++ memory-safety findings.
+sandboxed pipeline for execution-verified C/C++ memory-safety and
+Docker-replayable web findings.
 
 The project is designed to help security and engineering teams move from an
 understood attack surface to reproducible evidence and candidate fixes without
@@ -14,7 +15,7 @@ treating unverified scanner output as a security result.
 | Component | Purpose |
 | --- | --- |
 | Claude Code skills | Build threat models, statically scan code, triage findings, and produce candidate patches. |
-| `vuln-pipeline` | Run isolated agents against ASAN-instrumented C/C++ targets to produce independently verified crashes. |
+| `vuln-pipeline` | Run isolated agents against ASAN C/C++ targets or Docker-replayable Python, Node, and React web targets. |
 | Report and patch stages | Deduplicate verified crashes, assess exploitability, and validate proposed fixes against the original proof of concept. |
 | Sample targets | Start with the canary target, then adapt the pipeline for a supported target or your own codebase. |
 
@@ -32,9 +33,10 @@ findings without executing target code:
 ```
 
 **Use the execution pipeline** when you need reproducible C/C++ memory-safety
-findings. It builds and runs the target inside a restricted sandbox, uses ASAN
-to detect crashes, and verifies each submitted proof of concept in a separate
-container.
+or web findings. C/C++ targets use ASAN crashes. Web targets use a
+self-contained Docker replay command and preserve HTTP request/response or
+browser evidence; the grader repeats that exact replay in a separate container.
+Scanner output is lead generation only, never verified evidence.
 
 ## Quick start
 
@@ -100,8 +102,8 @@ review before adoption.
 
 - Interactive skills perform source-level analysis and artifact generation.
 - Autonomous pipeline agents run inside the configured gVisor sandbox with network egress restricted to the model API, and refuse to start outside it unless you explicitly pass `--dangerously-no-sandbox`.
-- Find and grade agents use separate containers; only the proof-of-concept
-  input crosses the trust boundary.
+- Find and grade agents use separate containers; only a PoC input or replay
+  manifest/evidence bundle crosses the trust boundary.
 - Do not mount secrets, production credentials, or sensitive host paths into
   the sandbox.
 
@@ -114,9 +116,9 @@ for assessors and other non-technical reviewers.
 
 ## Customize for your codebase
 
-The included pipeline targets C/C++ memory-safety issues using ASAN. The
-workflow can be adapted to other languages, vulnerability classes, and
-detection signals:
+The included pipeline supports `cpp_asan` plus Docker-replayable `python_web`,
+`node_web`, and `react_web` target profiles. The workflow can also be adapted
+to other languages, vulnerability classes, and detection signals:
 
 ```text
 /customize use <repository>/THREAT_MODEL.md and <repository>/TRIAGE.md

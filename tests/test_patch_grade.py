@@ -146,6 +146,12 @@ def test_t1_fails_on_nonzero_exit():
     assert not _t1_passes(1, "", "")
 
 
+def test_web_t1_requires_clean_configured_signal():
+    assert _t1_passes(0, "replay completed", "", "python_web", "VULNERABILITY_DETECTED")
+    assert not _t1_passes(0, "VULNERABILITY_DETECTED", "", "python_web", "VULNERABILITY_DETECTED")
+    assert not _t1_passes(1, "", "", "python_web", "VULNERABILITY_DETECTED")
+
+
 # ── ladder short-circuit (mocked docker) ─────────────────────────────────────
 
 

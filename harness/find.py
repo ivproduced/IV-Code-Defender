@@ -6,13 +6,14 @@ Budget: max_turns=2000 (one run is hours, not minutes).
 """
 from __future__ import annotations
 
+import json
 import time
 
 from . import docker_ops, sandbox
 from .agent import run_agent, parse_xml_tag, AgentResult
 from .artifacts import CrashArtifact
 from .config import TargetConfig
-from .prompts.find_prompt import build_find_prompt
+from .profiles import build_find_prompt, is_web, load_web_manifest
 
 
 DEFAULT_FIND_MAX_TURNS = 2000
@@ -48,15 +49,11 @@ async def run_find(
         memory=target.memory_limit, shm_size=target.shm_size, mounts=mounts,
     ) as container:
         prompt = build_find_prompt(
-            github_url=target.github_url,
-            commit=target.commit,
-            source_root=target.source_root,
-            binary_path=target.binary_path,
+            target=target,
             focus_area=focus_area,
             known_bugs=known_bugs if known_bugs is not None else target.known_bugs,
             found_bugs_path="/tmp/found_bugs.jsonl" if found_bugs_path else None,
             accept_dos=accept_dos,
-            reattack_harness=target.reattack_harness,
         )
         t0 = time.time()
         result = await run_agent(
@@ -71,8 +68,39 @@ async def run_find(
         )
         timings["find"] = time.time() - t0
 
-        # Parse tags — scan backwards, don't trust the last message
+        # Parse tags — scan backwards, don't trust the last message.
         text = result.find_tagged_message("poc_path")
+        if is_web(target.profile):
+            text = result.find_tagged_message("replay_manifest_path")
+            manifest_path = parse_xml_tag(text, "replay_manifest_path")
+            dup_check = parse_xml_tag(text, "dup_check")
+            if not manifest_path:
+                return None, result, timings
+            manifest_bytes = docker_ops.read_file(container, manifest_path)
+            if not manifest_bytes:
+                return None, result, timings
+            try:
+                manifest = load_web_manifest(manifest_bytes, target)
+            except ValueError:
+                return None, result, timings
+            replay_command = manifest["replay_command"]
+            if manifest_path not in replay_command:
+                return None, result, timings
+            evidence = manifest["evidence"]
+            return CrashArtifact(
+                poc_path=manifest_path,
+                poc_bytes=manifest_bytes,
+                reproduction_command=replay_command,
+                crash_type=parse_xml_tag(text, "finding_type") or "web-finding",
+                crash_output=json.dumps(evidence, sort_keys=True)[:10_000],
+                exit_code=0,
+                dup_check=dup_check,
+                profile=target.profile,
+                replay_manifest=manifest,
+                evidence_bundle=evidence,
+                detection_signal=json.dumps(manifest["detection_signal"], sort_keys=True),
+            ), result, timings
+
         poc_path = parse_xml_tag(text, "poc_path")
         reproduction_command = parse_xml_tag(text, "reproduction_command")
         crash_type = parse_xml_tag(text, "crash_type")

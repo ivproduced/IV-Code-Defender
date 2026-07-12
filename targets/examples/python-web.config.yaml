@@ -1,0 +1,10 @@
+# Template only: pair with a Dockerfile and immutable /opt/vp/replay verifier.
+profile: python_web
+image_tag: my-python-web:latest
+github_url: https://github.com/example/python-web
+commit: <pinned-commit>
+binary_path: /opt/vp/replay
+source_root: /work/app
+replay_command: /opt/vp/replay
+detection_signal: VULNERABILITY_DETECTED
+attack_surface: Authenticated JSON API behind the application's normal router.

@@ -1,7 +1,7 @@
 # Adding a new target
 
 A target is a directory under `targets/` containing everything the pipeline
-needs to build an ASAN-instrumented binary and point the find-agent at it.
+needs to build an ASAN-instrumented binary or a Docker-replayable web target.
 
 ## Required files
 
@@ -14,6 +14,27 @@ commit: <full-sha>                      # pin exactly what you tested
 binary_path: /work/entry                # path INSIDE the container
 source_root: /work                      # path INSIDE the container
 ```
+
+### Profiles
+
+`profile` defaults to `cpp_asan`, preserving the original ASAN contract.
+Supported web profiles are `python_web`, `node_web`, and `react_web`. They
+retain `binary_path` for compatibility (use the replay executable) and require:
+
+```yaml
+profile: python_web
+replay_command: /work/replay             # absolute, simple command; no shell syntax
+detection_signal: VULNERABILITY_DETECTED # marker printed only while the issue remains
+```
+
+The `replay_command` script owns its complete lifecycle: it starts the local
+service/browser, replays `/tmp/replay.json`, captures evidence, and stops its
+children. Docker is primary; Podman remains supported by the existing sandbox
+setup. A web find must save a UTF-8 JSON replay manifest with its exact
+self-contained command, structured HTTP `requests`/`responses` or browser
+`steps`/`observations`, a deterministic target-owned detection signal, and
+concrete security impact. That manifest—not scanner output—crosses into the
+pristine grader, which replays it three times and rejects test-only paths.
 
 Optional fields:
 
@@ -54,6 +75,11 @@ Must produce an image where:
 - `python3`, `xxd`, `file`, `gdb` are available (agent uses these to craft inputs)
 - `/bin/bash` works (container entrypoint)
 
+For web profiles, also include the application runtime and an immutable
+`/opt/vp/replay` verifier outside `source_root`, executable without host
+networking or credentials. Do not rely on a service left by the find agent:
+find, grade, report, and patch-grade containers are intentionally separate.
+
 Template:
 
 ```dockerfile
@@ -79,6 +105,12 @@ CMD ["/bin/bash"]
 A thin wrapper: `./entry <input_file>` → run the parser on the file, exit.
 Keep it minimal — it defines the attack surface. ASAN abort happens before
 `return 0` if there's memory corruption.
+
+## Examples
+
+`targets/examples/` has lightweight Python, Node, and React configuration
+shapes. They are non-runnable templates; copy one beside a Dockerfile and a
+replay script that match your application.
 
 ## Zero pipeline changes
 
