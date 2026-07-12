@@ -22,15 +22,16 @@ result. Only the minimum information needed to validate a suspected issue is
 transferred between those environments.
 
 The system retains assessment records, including the evidence supporting a
-validated finding and any recommended corrective action. Agent access to
-external AI services is limited to approved model-provider endpoints through a
-controlled connection. Operational logs provide an audit record of assessment
-activity for security review.
+validated finding. When the optional patch workflow is run, records can also
+include a recommended corrective action. Agent access to external AI services
+is limited to approved model-provider endpoints through a controlled
+connection. Operational logs provide an audit record of assessment activity for
+security review.
 
 This process supports security review by providing a repeatable record of what
-was assessed, what was found, how a finding was independently validated, and
-what corrective action was proposed. It does not replace an assessor's
-judgment, organizational risk decisions, or required human review.
+was assessed, what was found, how a finding was independently validated, and,
+where available, what corrective action was proposed. It does not replace an
+assessor's judgment, organizational risk decisions, or required human review.
 
 ## Keep the internal port distinct
 
