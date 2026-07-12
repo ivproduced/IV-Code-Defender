@@ -5,6 +5,33 @@ not an authorization package, a FedRAMP authorization, a FISMA assessment, or
 a determination of data rights, export controls, or records obligations.
 Those decisions belong to the deploying organization's authorized officials.
 
+## Plain-language agent execution overview
+
+This section is intended for assessors and other reviewers who do not need to
+operate the system.
+
+An authorized operator starts an assessment and selects the approved software
+target to review. The system then uses specialized AI agents with limited,
+separate responsibilities. One agent identifies areas for review, another
+looks for potential security weaknesses, and a separate validation agent checks
+each suspected issue before it is recorded as a finding.
+
+The agents work in controlled, separated environments. This prevents a
+discovery agent from changing the validation agent's work or influencing its
+result. Only the minimum information needed to validate a suspected issue is
+transferred between those environments.
+
+The system retains assessment records, including the evidence supporting a
+validated finding and any recommended corrective action. Agent access to
+external AI services is limited to approved model-provider endpoints through a
+controlled connection. Operational logs provide an audit record of assessment
+activity for security review.
+
+This process supports security review by providing a repeatable record of what
+was assessed, what was found, how a finding was independently validated, and
+what corrective action was proposed. It does not replace an assessor's
+judgment, organizational risk decisions, or required human review.
+
 ## Keep the internal port distinct
 
 Create the internal port from an approved, pinned revision. Give it a separate
