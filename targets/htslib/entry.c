@@ -1,4 +1,4 @@
-// Copyright 2026 Anthropic PBC
+// Copyright 2026 IVProduced contributors
 // SPDX-License-Identifier: Apache-2.0
 // entry: ./entry <file>
 // htslib exposes two parsing surfaces exercised here: (1) the BGZF index

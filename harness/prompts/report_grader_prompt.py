@@ -1,4 +1,4 @@
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 """Report-grader prompt: scores an exploitability report's five analysis
 sections + escalation bonus, and extracts severity/reachability/novelty tokens.

@@ -1,4 +1,4 @@
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 """scripts/egress_proxy.py:_allowed — wildcard semantics + parity with
 harness.auth._host_allowed (the two must agree or vp-sandboxed's preflight

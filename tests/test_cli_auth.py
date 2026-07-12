@@ -1,4 +1,4 @@
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 """Back-compat shim: cli._resolve_auth_env / NO_AUTH_MSG re-export harness.auth."""
 import pytest

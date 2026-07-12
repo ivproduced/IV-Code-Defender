@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 # One-time setup for the agent sandbox: gVisor runtime, egress-only network,
 # per-target agent images, and verification. After this, `bin/vp-sandboxed`

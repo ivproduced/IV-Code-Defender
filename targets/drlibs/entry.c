@@ -1,4 +1,4 @@
-// Copyright 2026 Anthropic PBC
+// Copyright 2026 IVProduced contributors
 // SPDX-License-Identifier: Apache-2.0
 // entry: ./entry <audio-file>
 // Sniff magic bytes and dispatch. WAV path enables metadata parsing (smpl,
