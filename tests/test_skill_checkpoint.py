@@ -1,4 +1,4 @@
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for .claude/skills/_lib/checkpoint.py.
 

@@ -1,4 +1,4 @@
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 """Provider/auth resolution — single source of truth for cli.py and the
 sandbox shell scripts (setup_sandbox.sh, vp-sandboxed)."""

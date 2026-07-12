@@ -1,4 +1,4 @@
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 """Provider resolution + compliance mapping tests."""
 import json
@@ -67,6 +67,10 @@ def test_build_oscal(tmp_path):
     assessment_results = doc["assessment-results"]
     f = assessment_results["results"][0]["findings"]
     assert len(f) == 1 and f[0]["props"][1]["value"] == "CWE-415"
+    props = {prop["name"]: prop["value"] for prop in f[0]["props"]}
+    assert props["source-report"] == "reports/bug_01/report.json"
+    assert len(props["source-report-sha256"]) == 64
+    assert "not a control assessment" in assessment_results["metadata"]["remarks"]
     assert assessment_results["metadata"]["oscal-version"] == "1.1.3"
     for identifier in (
         assessment_results["uuid"],

@@ -81,7 +81,7 @@ focus areas before increasing concurrency:
 bin/vp-sandboxed run <target> --model <model-id> --runs 3 --parallel --stream --auto-focus
 # Generate a candidate patch for each finding
 bin/vp-sandboxed patch results/<target>/<timestamp>/ --model <model-id>
-# Export NIST 800-53 / OSCAL assessment-results for FedRAMP tooling
+# Export traceable NIST 800-53 mappings as OSCAL technical evidence
 bin/vp-sandboxed oscal results/<target>/<timestamp>/
 ```
 
@@ -107,6 +107,8 @@ review before adoption.
 
 Read [Security](docs/security.md) and [Agent sandbox](docs/agent-sandbox.md)
 before running targets outside the supplied examples.
+
+For deployment in a federal environment, see [Federal deployment](docs/federal-deployment.md).
 
 ## Customize for your codebase
 

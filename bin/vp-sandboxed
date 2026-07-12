@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 # Run vuln-pipeline with the agent sandbox active. Verifies runsc + the
 # egress proxy are up, then sets the env the pipeline reads (sandbox.py) and

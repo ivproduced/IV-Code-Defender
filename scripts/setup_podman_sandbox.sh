@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 # One-time rootful Podman + gVisor sandbox setup. See docs/agent-sandbox.md.
 set -euo pipefail

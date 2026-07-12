@@ -1,16 +1,23 @@
-# Copyright 2026 Anthropic PBC
+# Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
-"""NIST SP 800-53 Release 5.2.0 mapping + OSCAL 1.1.3 export.
+# This IVProduced derivative addition is not authored by Anthropic PBC.
+"""NIST SP 800-53 Release 5.2.0 mapping + OSCAL 1.1.3 evidence export.
 
 The harness verifies memory-safety crashes, so the mapping keys off the ASAN
 crash type and the report severity. Each finding ties to the controls a fix
-satisfies (SA-11 testing, SI-16 memory protection, SI-10 input validation,
-SI-2 flaw remediation, SC-5 DoS). enrich() stamps a compliance block onto each
-report.json; build_oscal() rolls a results dir into an OSCAL assessment-results
-document for FedRAMP tooling.
+may support as technical evidence (SA-11 testing, SI-16 memory protection,
+SI-10 input validation, SI-2 flaw remediation, SC-5 DoS). enrich() stamps an
+evidence mapping onto each report.json; build_oscal() rolls a results dir into
+an OSCAL assessment-results document for review by the system owner.
+
+This mapping is not a control assessment, authorization decision, or claim of
+FedRAMP compliance. The deploying organization must validate the document,
+relate it to its system-specific controls, and retain it under its records
+policy.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -19,6 +26,10 @@ from pathlib import Path
 NIST_SP_800_53_VERSION = "NIST SP 800-53 Release 5.2.0"
 OSCAL_VERSION = "1.1.3"
 _UUID_NAMESPACE = uuid.UUID("2c06aa18-a03c-5662-b0da-014d44708b63")
+_EVIDENCE_SCOPE = (
+    "Automation-produced technical evidence only; not a control assessment, "
+    "authorization decision, or compliance attestation."
+)
 
 NIST_CONTROLS = {
     "SA-11": ("Developer Security and Privacy Testing", "System and Services Acquisition"),
@@ -80,8 +91,17 @@ def _stable_uuid(value: str) -> str:
     return str(uuid.uuid5(_UUID_NAMESPACE, value))
 
 
+def _sha256(path: Path) -> str:
+    """Return a content digest that lets reviewers identify the source report."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def build_oscal(results_dir: Path) -> dict:
-    """Aggregate reports into an OSCAL 1.1.3 assessment-results document."""
+    """Aggregate reports into an OSCAL 1.1.3 evidence document.
+
+    Callers are responsible for validating the generated OSCAL with the
+    organization-approved tooling before submitting it to a governance system.
+    """
     reports = sorted((results_dir / "reports").glob("bug_*/report.json"))
     findings = []
     for rp in reports:
@@ -102,6 +122,8 @@ def build_oscal(results_dir: Path) -> dict:
             "props": [
                 {"name": "severity", "value": verdict.get("severity_rating", "NOT_STATED")},
                 {"name": "cwe", "value": comp["cwe"]},
+                {"name": "source-report", "value": str(rp.relative_to(results_dir))},
+                {"name": "source-report-sha256", "value": _sha256(rp)},
             ],
             "related-controls": {
                 "control-selections": [
@@ -117,11 +139,13 @@ def build_oscal(results_dir: Path) -> dict:
                 "title": "IV-Code-Defender assessment results",
                 "last-modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "version": "1.0", "oscal-version": OSCAL_VERSION,
+                "remarks": _EVIDENCE_SCOPE,
             },
             "results": [{
                 "uuid": _stable_uuid(f"result:{results_dir.resolve()}"),
                 "title": "Execution-verified memory-safety findings",
                 "start": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "remarks": _EVIDENCE_SCOPE,
                 "findings": findings,
             }],
         }
