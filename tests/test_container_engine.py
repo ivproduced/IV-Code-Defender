@@ -8,6 +8,7 @@ import subprocess
 import pytest
 
 from harness import docker_ops
+from harness.cli import _container_name, _container_scope
 
 
 def test_docker_is_default(monkeypatch):
@@ -89,3 +90,17 @@ def test_run_applies_least_privilege_defaults(monkeypatch):
     assert ["--pids-limit", "512"] == command[
         command.index("--pids-limit"):command.index("--pids-limit") + 2
     ]
+
+
+def test_container_names_are_namespaced_by_results_batch(tmp_path):
+    first = _container_scope(tmp_path / "results" / "target" / "batch-a")
+    second = _container_scope(tmp_path / "results" / "target" / "batch-b")
+    assert first != second
+    assert _container_name("find", "target", first, 0) != \
+        _container_name("find", "target", second, 0)
+
+
+def test_container_name_sanitizes_target_and_stays_bounded():
+    name = _container_name("report", "target with/slashes" * 20, "abc123", 7)
+    assert len(name) <= 120
+    assert " " not in name and "/" not in name

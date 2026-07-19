@@ -26,12 +26,14 @@ AUTH_VARS = (
     "AWS_BEARER_TOKEN_BEDROCK",
     "ANTHROPIC_VERTEX_PROJECT_ID",
     "CLOUD_ML_REGION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_SMALL_FAST_MODEL",
     "ANTHROPIC_CUSTOM_HEADERS",
     "ANTHROPIC_BASE_URL",
     "VULN_PIPELINE_NO_TELEMETRY",
+    "VULN_PIPELINE_PROVIDER",
 )
 
 
@@ -142,6 +144,14 @@ def test_bedrock_no_creds_returns_none(monkeypatch, capsys):
     assert "aws configure export-credentials" in err
 
 
+def test_bedrock_rejects_incomplete_access_key_pair(monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA")
+    assert resolve_auth_env() is None
+    assert "no credentials" in capsys.readouterr().err
+
+
 def test_precedence_bedrock_over_api_key(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
@@ -152,15 +162,34 @@ def test_precedence_bedrock_over_api_key(monkeypatch):
     assert "ANTHROPIC_API_KEY" not in env
 
 
-def test_vertex(monkeypatch):
+def test_explicit_provider_overrides_configured_provider(monkeypatch):
+    monkeypatch.setenv("VULN_PIPELINE_PROVIDER", "bedrock")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    env = resolve_auth_env("anthropic")
+    assert env and env["ANTHROPIC_API_KEY"] == "sk-ant-x"
+
+
+def test_vertex(monkeypatch, tmp_path):
+    credentials = tmp_path / "vertex.json"
+    credentials.write_text("{}")
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
-    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "proj")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "proj-123")
     monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(credentials))
     assert resolve_auth_env() == {
         "CLAUDE_CODE_USE_VERTEX": "1",
-        "ANTHROPIC_VERTEX_PROJECT_ID": "proj",
+        "ANTHROPIC_VERTEX_PROJECT_ID": "proj-123",
         "CLOUD_ML_REGION": "us-central1",
+        "GOOGLE_APPLICATION_CREDENTIALS": str(credentials.resolve()),
     }
+
+
+def test_vertex_requires_scoped_credential_file(monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "proj-123")
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+    assert resolve_auth_env() is None
+    assert "GOOGLE_APPLICATION_CREDENTIALS" in capsys.readouterr().err
 
 
 # ── usage marker ────────────────────────────────────────────────────────────
@@ -275,10 +304,21 @@ def test_required_egress_hosts_bedrock(monkeypatch):
     assert required_egress_hosts() == ["bedrock-runtime.us-east-1.amazonaws.com:443"]
 
 
-def test_required_egress_hosts_vertex_exits(monkeypatch):
+def test_required_egress_hosts_vertex(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
-    with pytest.raises(SystemExit):
-        required_egress_hosts()
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+    assert required_egress_hosts() == [
+        "us-central1-aiplatform.googleapis.com:443",
+        "oauth2.googleapis.com:443",
+    ]
+
+
+def test_vertex_egress_preflight_accepts_complete_allowlist(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+    check_egress_satisfied(
+        "us-central1-aiplatform.googleapis.com:443,oauth2.googleapis.com:443"
+    )
 
 
 # ── check_egress_satisfied ──────────────────────────────────────────────────

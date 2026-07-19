@@ -28,9 +28,18 @@ for arg in "$@"; do
     previous=$arg
 done
 case "$provider" in
-    bedrock) export CLAUDE_CODE_USE_BEDROCK=1 ;;
-    vertex) export CLAUDE_CODE_USE_VERTEX=1 ;;
-    ""|anthropic) ;;
+    bedrock)
+        export CLAUDE_CODE_USE_BEDROCK=1
+        unset CLAUDE_CODE_USE_VERTEX
+        ;;
+    vertex)
+        export CLAUDE_CODE_USE_VERTEX=1
+        unset CLAUDE_CODE_USE_BEDROCK
+        ;;
+    anthropic)
+        unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX
+        ;;
+    "") ;;
 esac
 
 case "$ENGINE" in

@@ -58,7 +58,14 @@ sudo podman network inspect "$NET" >/dev/null 2>&1 || \
     sudo podman network create --internal "$NET" >/dev/null
 sudo podman build -q -t "$PROXY_TAG" -f scripts/Dockerfile.proxy scripts >/dev/null
 sudo podman rm -f "$PROXY_NAME" >/dev/null 2>&1 || true
-ALLOW=${VP_EGRESS_ALLOW:-api.anthropic.com:443}
+[ -x .venv/bin/vuln-pipeline ] || { python3 -m venv .venv; .venv/bin/pip install -q -e .; }
+if [ -n "${VP_EGRESS_ALLOW:-}" ]; then
+    ALLOW="$VP_EGRESS_ALLOW"
+else
+    ALLOW=$(.venv/bin/python3 -c \
+        'from harness.auth import required_egress_hosts; print(",".join(required_egress_hosts()))') \
+        || die "egress allowlist derivation failed (see error above)"
+fi
 sudo podman run -d --name "$PROXY_NAME" --restart=unless-stopped \
     -e VP_EGRESS_ALLOW="$ALLOW" --network bridge "$PROXY_TAG" >/dev/null
 sudo podman network connect "$NET" "$PROXY_NAME"
@@ -67,7 +74,6 @@ proxy_ip=$(sudo podman inspect "$PROXY_NAME" --format \
 ok "proxy ${PROXY_NAME} up on ${NET} (${proxy_ip}:3128, allow: ${ALLOW})"
 
 step "Target + agent images"
-[ -x .venv/bin/vuln-pipeline ] || { python3 -m venv .venv; .venv/bin/pip install -q -e .; }
 for d in targets/*/; do
     [ -f "$d/config.yaml" ] || continue
     tag=$(.venv/bin/python3 -c 'import sys,yaml;print(yaml.safe_load(open(sys.argv[1]))["image_tag"])' "$d/config.yaml")

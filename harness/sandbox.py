@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+from pathlib import Path
 from typing import Iterator
 
 from . import agent_image, docker_ops
@@ -23,6 +24,7 @@ RUNTIME_ENV = "VULN_PIPELINE_AGENT_RUNTIME"
 PROXY_ENV = "VULN_PIPELINE_EGRESS_PROXY"
 NETWORK_ENV = "VULN_PIPELINE_AGENT_NETWORK"
 NETWORK_DEFAULT = "vp-internal"
+VERTEX_CREDENTIAL_PATH = "/run/secrets/google-application-credentials.json"
 
 
 def runtime() -> str | None:
@@ -77,6 +79,7 @@ def agent_container(
     any — under ``--dangerously-no-sandbox`` the default falls back to
     ``bridge``, and a binary fed an attacker-crafted PoC shouldn't get that."""
     img = agent_image.ensure(target_tag)
+    env, prepared_mounts = _prepare_container_auth(auth, mounts)
     container = docker_ops.run(
         img,
         name=name,
@@ -84,8 +87,8 @@ def agent_container(
         network=network if network is not None else _default_network(),
         memory=memory,
         shm_size=shm_size,
-        env=container_env(auth),
-        mounts=list(mounts or []),
+        env=env,
+        mounts=prepared_mounts,
     )
     try:
         yield container
@@ -105,6 +108,32 @@ def container_env(auth: dict[str, str] | None) -> dict[str, str]:
         e["HTTPS_PROXY"] = p
         e["https_proxy"] = p
     return e
+
+
+def _prepare_container_auth(
+    auth: dict[str, str] | None,
+    mounts: list[tuple[str, str]] | None,
+) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    """Translate host credential-file paths into one exact read-only mount.
+
+    Vertex uses Application Default Credentials from a JSON file. Mount only
+    that file—not its parent or the user's gcloud directory—and point the
+    in-container process at a fixed path. Other providers remain env-only.
+    """
+    env = container_env(auth)
+    prepared = list(mounts or [])
+    credential = env.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not credential:
+        return env, prepared
+
+    source = Path(credential).expanduser().resolve()
+    if not source.is_file():
+        raise ValueError(f"GOOGLE_APPLICATION_CREDENTIALS is not a file: {source}")
+    if any(dst == VERTEX_CREDENTIAL_PATH for _src, dst in prepared):
+        raise ValueError(f"mount destination {VERTEX_CREDENTIAL_PATH} is reserved")
+    prepared.append((str(source), VERTEX_CREDENTIAL_PATH))
+    env["GOOGLE_APPLICATION_CREDENTIALS"] = VERTEX_CREDENTIAL_PATH
+    return env, prepared
 
 
 def require(override: bool) -> str | None:

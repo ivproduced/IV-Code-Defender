@@ -10,6 +10,7 @@ Budget: 50 turns — it's a checklist, not research.
 """
 from __future__ import annotations
 
+import math
 import os
 import time
 
@@ -78,28 +79,33 @@ async def run_grade(
         elapsed = time.time() - t0
 
         text = result.find_tagged_message("overall")
-        criteria: dict[str, bool] = {}
-        for i in range(1, 6):
-            val = parse_xml_tag(text, f"criterion_{i}")
-            criteria[f"criterion_{i}"] = val is not None and val.upper().startswith("PASS")
+        return _parse_verdict(text), result, elapsed
 
-        overall = parse_xml_tag(text, "overall")
-        score_str = parse_xml_tag(text, "score")
-        evidence = parse_xml_tag(text, "evidence") or ""
 
-        verdict = GraderVerdict(
-            passed=(overall is not None and overall.upper().startswith("PASS")),
-            score=_parse_score(score_str),
-            criteria=criteria,
-            evidence=evidence,
+def _parse_verdict(text: str) -> GraderVerdict:
+    """Parse grader output and enforce the five-criterion rubric in code."""
+    criteria: dict[str, bool] = {}
+    for i in range(1, 6):
+        val = parse_xml_tag(text, f"criterion_{i}")
+        criteria[f"criterion_{i}"] = (
+            val is not None and val.upper().startswith("PASS")
         )
-        return verdict, result, elapsed
+
+    overall = parse_xml_tag(text, "overall")
+    overall_pass = overall is not None and overall.upper().startswith("PASS")
+    return GraderVerdict(
+        passed=overall_pass and all(criteria.values()),
+        score=_parse_score(parse_xml_tag(text, "score")),
+        criteria=criteria,
+        evidence=parse_xml_tag(text, "evidence") or "",
+    )
 
 
 def _parse_score(s: str | None) -> float:
     if not s:
         return 0.0
     try:
-        return float(s.strip())
+        value = float(s.strip())
     except ValueError:
         return 0.0
+    return value if math.isfinite(value) and 0.0 <= value <= 1.0 else 0.0

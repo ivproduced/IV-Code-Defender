@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -66,7 +68,7 @@ NO_AUTH_MSG = (
     "error: no auth found for the selected provider.\n"
     "  anthropic: ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN\n"
     "  bedrock:   AWS_* creds + --provider bedrock (CLAUDE_CODE_USE_BEDROCK)\n"
-    "  vertex:    GCP creds + --provider vertex (CLAUDE_CODE_USE_VERTEX)"
+    "  vertex:    project, region, and GOOGLE_APPLICATION_CREDENTIALS + --provider vertex"
 )
 
 
@@ -79,31 +81,10 @@ def _resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
       1. ANTHROPIC_API_KEY            — long-lived key
       2. CLAUDE_CODE_OAUTH_TOKEN      — subscription-plan token
 
-    Bedrock/Vertex authenticate through the cloud SDK env (AWS_*/GCP creds).
-    When their regional endpoints need allowlisting, setup guidance is printed
-    for VP_EGRESS_ALLOW.
+    Bedrock/Vertex authenticate through scoped cloud credentials. The same
+    resolver is used by sandbox setup to derive the provider egress allowlist.
     """
-    # Prefer the upstream environment-based resolver when no legacy provider
-    # selector was supplied. This keeps setup and runtime preflights aligned.
-    if provider is None:
-        return _resolve_environment_auth()
-
-    prov = providers.resolve_provider(provider)
-    penv = providers.resolve_provider_env(prov)
-    env = dict(penv.env)
-    if prov == "anthropic" and not (
-        env.get("ANTHROPIC_API_KEY") or env.get("CLAUDE_CODE_OAUTH_TOKEN")
-    ):
-        return None
-    if penv.egress_hosts:
-        needed = ", ".join(penv.egress_hosts)
-        print(color(
-            f"[provider:{prov}] ensure egress allowlist includes: {needed}\n"
-            f"  set VP_EGRESS_ALLOW=\"api.anthropic.com:443,{','.join(penv.egress_hosts)}\" "
-            f"before the matching setup script: scripts/setup_sandbox.sh (Docker) "
-            f"or scripts/setup_podman_sandbox.sh (Podman)", "dim", sys.stderr),
-            file=sys.stderr)
-    return env
+    return _resolve_environment_auth(provider)
 
 
 def _provider_name(provider: str | None) -> str:
@@ -155,7 +136,26 @@ def _terminate_subprocesses() -> None:
             pass
 
 
-_current_target_name: str | None = None
+_current_container_token: str | None = None
+
+
+def _container_scope(path: Path) -> str:
+    """Stable, short namespace for every container belonging to one batch."""
+    return hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:10]
+
+
+def _container_name(
+    phase: str, target_name: str, scope: str, index: int | None = None,
+) -> str:
+    safe_target = re.sub(r"[^A-Za-z0-9_.-]", "-", target_name)[:48] or "target"
+    suffix = f"_{index}" if index is not None else ""
+    return f"{phase}_{safe_target}_{scope}{suffix}"[:120]
+
+
+def _set_container_cleanup_scope(target_name: str, scope: str) -> None:
+    global _current_container_token
+    safe_target = re.sub(r"[^A-Za-z0-9_.-]", "-", target_name)[:48] or "target"
+    _current_container_token = f"_{safe_target}_{scope}"
 
 
 def _on_signal(signum, frame) -> None:
@@ -166,24 +166,23 @@ def _on_signal(signum, frame) -> None:
     SIGTERM leaves containers orphaned (4GB memory reservation each) AND the
     SDK's Node subprocess orphaned to init, still executing tool calls against
     whatever container holds the name. Kill children first, then containers.
-    Container names are target-scoped (find_<target>_N, grader_<target>_N,
-    recon_<target>, report_<target>_N) so parallel runs on different targets
-    don't collide. The filter matches only this process's target.
+    Container names include a stable results-batch namespace, so cleanup
+    matches only containers launched for this command and cannot remove a
+    concurrent batch scanning the same target.
     """
     print(f"\n[cleanup] signal {signum} received, terminating subprocesses + removing containers", file=sys.stderr)
     _terminate_subprocesses()
-    t = _current_target_name or "target"
-    r = subprocess.run(
-        docker_ops.command("ps", "-q",
-         "--filter", f"name=find_{t}_",
-         "--filter", f"name=grader_{t}_",
-         "--filter", f"name=recon_{t}",
-         "--filter", f"name=report_{t}_"),
-        capture_output=True, text=True,
-    )
-    ids = r.stdout.split()
-    if ids:
-        subprocess.run(docker_ops.command("rm", "-f", *ids), capture_output=True)
+    if _current_container_token:
+        r = subprocess.run(
+            docker_ops.command(
+                "ps", "-q", "--filter", f"name={_current_container_token}"
+            ),
+            capture_output=True,
+            text=True,
+        )
+        ids = r.stdout.split()
+        if ids:
+            subprocess.run(docker_ops.command("rm", "-f", *ids), capture_output=True)
     # Re-raise with default handling so exit code reflects the signal.
     signal.signal(signum, signal.SIG_DFL)
     signal.raise_signal(signum)
@@ -265,6 +264,7 @@ async def _run_once(
     stream_ctx: dict | None = None,
     accept_dos: bool = False,
     system_prompt: str | None = None,
+    container_scope: str = "default",
 ) -> RunResult:
     """One find(+grade) attempt. Assumes image is already built.
 
@@ -275,8 +275,8 @@ async def _run_once(
     """
     timings: dict[str, float] = {}
     out_dir.mkdir(parents=True, exist_ok=True)
-    find_container = f"find_{target.name}_{run_idx}"
-    grade_container = f"grader_{target.name}_{run_idx}"
+    find_container = _container_name("find", target.name, container_scope, run_idx)
+    grade_container = _container_name("grader", target.name, container_scope, run_idx)
 
     def _done(result: RunResult) -> RunResult:
         _write_result(out_dir, result)
@@ -444,7 +444,9 @@ async def _stream_dispatch(
             poc_size=len(crash.poc_bytes),
             manifest_entries=manifest,
             model=model, image_tag=target.image_tag, agent_env=agent_env,
-            container_name=f"judge_{target.name}_{run_idx}",
+            container_name=_container_name(
+                "judge", target.name, ctx["container_scope"], run_idx
+            ),
             transcript_path=str(reports_root / f"judge_run{run_idx:03d}.jsonl"),
             progress_prefix=f"[judge:{run_idx}]",
             system_prompt=ctx["system_prompt"],
@@ -472,6 +474,7 @@ async def _stream_dispatch(
         reports_root, re_report=(jv.judgment == "DUP_BETTER"),
         novelty=ctx["novelty"], max_turns=ctx["report_max_turns"],
         system_prompt=ctx["system_prompt"],
+        container_scope=ctx["container_scope"],
     ))
     ctx["report_tasks"].append(task)
 
@@ -513,6 +516,7 @@ async def _stream_report(
     novelty: bool,
     max_turns: int,
     system_prompt: str | None,
+    container_scope: str,
 ) -> dict:
     """Write an exploitability report for one crash. If re_report, preserve
     the existing report as report_v1.json and run a compare agent after the
@@ -551,7 +555,9 @@ async def _stream_report(
             workspace_dir=str(out_dir / "workspace"),
             upstream_log=log, crash_file=crash_file,
             agent_env=agent_env,
-            container_name=f"report_{target.name}_{run_idx}",
+            container_name=_container_name(
+                "report", target.name, container_scope, run_idx
+            ),
             max_turns=max_turns,
             transcript_path=str(out_dir / f"report_transcript_run{run_idx:03d}.jsonl"),
             progress_prefix=f"[report:{run_idx}→bug_{bug_id:02d}]",
@@ -587,7 +593,9 @@ async def _stream_report(
         winner, reasoning, _cr, c_elapsed = await run_compare(
             report_a=old_report_text, report_b=report_text,
             model=model, image_tag=target.image_tag, agent_env=agent_env,
-            container_name=f"compare_{target.name}_{run_idx}",
+            container_name=_container_name(
+                "compare", target.name, container_scope, run_idx
+            ),
             transcript_path=str(out_dir / f"compare_run{run_idx:03d}.jsonl"),
             progress_prefix=f"[compare:{run_idx}→bug_{bug_id:02d}]",
             system_prompt=system_prompt,
@@ -711,6 +719,7 @@ async def _run_all(
 ) -> list[tuple[Path, RunResult]]:
     """Build once, optionally recon, then dispatch N find+grade cycles."""
     system_prompt = build_system_prompt(args.engagement_context)
+    container_scope = _container_scope(results_root)
 
     # ── Build (once, shared by all runs) ──────────────────────────────────────────
     print(color(f"[build] Building {target.image_tag} from {target.dockerfile_dir} ...", "dim"))
@@ -748,6 +757,9 @@ async def _run_all(
             max_turns=args.recon_max_turns,
             transcript_path=str(results_root / "recon_transcript.jsonl"),
             system_prompt=system_prompt,
+            container_name=_container_name(
+                "recon", target.name, container_scope
+            ),
         )
         if discovered:
             focus_areas = discovered
@@ -793,6 +805,7 @@ async def _run_all(
             "novelty": args.novelty,
             "report_max_turns": args.report_max_turns,
             "system_prompt": system_prompt,
+            "container_scope": container_scope,
         }
         if args.resume:
             judged = _judged_runs(stream_ctx["reports_root"])
@@ -817,7 +830,8 @@ async def _run_all(
             return _checkpointed(i)
         return _run_once(i, target, args.model, args.find_only, args.max_turns, agent_env,
                          out_dirs[i], _assigned_focus(i, focus_areas), found_bugs_path,
-                         stream_ctx, accept_dos=args.accept_dos, system_prompt=system_prompt)
+                         stream_ctx, accept_dos=args.accept_dos, system_prompt=system_prompt,
+                         container_scope=container_scope)
 
     if args.parallel:
         n_live = args.runs - len(checkpoints)
@@ -888,6 +902,7 @@ def main() -> int:
     p_run.add_argument("--model", default=os.environ.get("VULN_PIPELINE_MODEL"),
                        help="Model string (required; or set VULN_PIPELINE_MODEL)")
     p_run.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
+                       choices=providers.FLEET_PROVIDERS,
                        help="Model provider: anthropic (default), bedrock, vertex")
     p_run.add_argument("--results-dir", default="./results", help="Output root")
     p_run.add_argument("--resume", type=Path, default=None, metavar="DIR",
@@ -923,6 +938,7 @@ def main() -> int:
     p_recon.add_argument("--model", default=os.environ.get("VULN_PIPELINE_MODEL"),
                          help="Model string (required; or set VULN_PIPELINE_MODEL)")
     p_recon.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
+                       choices=providers.FLEET_PROVIDERS,
                        help="Model provider: anthropic (default), bedrock, vertex")
     p_recon.add_argument("--max-turns", type=int, default=RECON_MAX_TURNS,
                          help=f"Recon-agent turn budget (default {RECON_MAX_TURNS})")
@@ -942,6 +958,7 @@ def main() -> int:
     p_report.add_argument("--model", default=os.environ.get("VULN_PIPELINE_MODEL"),
                           help="Model string (required; or set VULN_PIPELINE_MODEL)")
     p_report.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
+                       choices=providers.FLEET_PROVIDERS,
                        help="Model provider: anthropic (default), bedrock, vertex")
     p_report.add_argument("--parallel", action="store_true",
                           help="Run report agents concurrently")
@@ -971,6 +988,7 @@ def main() -> int:
     p_patch.add_argument("--model", default=os.environ.get("VULN_PIPELINE_MODEL"),
                          help="Model string (required; or set VULN_PIPELINE_MODEL)")
     p_patch.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
+                       choices=providers.FLEET_PROVIDERS,
                        help="Model provider: anthropic (default), bedrock, vertex")
     p_patch.add_argument("--parallel", action="store_true",
                          help="Run patch agents concurrently")
@@ -1031,9 +1049,6 @@ def _cmd_run(args) -> int:
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    global _current_target_name
-    _current_target_name = target.name
-
     agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
         print(NO_AUTH_MSG, file=sys.stderr)
@@ -1043,7 +1058,7 @@ def _cmd_run(args) -> int:
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)
         return 1
-    _warn_bedrock_model(args.model)
+    _warn_bedrock_model(args.model, getattr(args, "provider", None))
 
     print(f"Target: {target.name}")
     print(f"  image_tag:   {target.image_tag}")
@@ -1073,6 +1088,8 @@ def _cmd_run(args) -> int:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         results_root = Path(args.results_dir) / target.name / timestamp
 
+    _set_container_cleanup_scope(target.name, _container_scope(results_root))
+
     pairs = asyncio.run(_run_all(target, args, agent_env, results_root))
 
     print("\n── Summary ────────────────────────────────────────────────────────────────────")
@@ -1101,8 +1118,8 @@ def _cmd_recon(args) -> int:
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    global _current_target_name
-    _current_target_name = target.name
+    recon_scope = f"p{os.getpid()}"
+    _set_container_cleanup_scope(target.name, recon_scope)
 
     agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
@@ -1112,7 +1129,7 @@ def _cmd_recon(args) -> int:
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)
         return 1
-    _warn_bedrock_model(args.model)
+    _warn_bedrock_model(args.model, getattr(args, "provider", None))
 
     print(color(f"[build] Building {target.image_tag} ...", "dim", sys.stderr), file=sys.stderr)
     try:
@@ -1125,6 +1142,7 @@ def _cmd_recon(args) -> int:
     areas, result = asyncio.run(run_recon(
         target, model=args.model, agent_env=agent_env, max_turns=args.max_turns,
         system_prompt=build_system_prompt(args.engagement_context),
+        container_name=_container_name("recon", target.name, recon_scope),
     ))
 
     if result.error:
@@ -1193,6 +1211,7 @@ async def _report_one(
     args,
     agent_env: dict[str, str],
     reports_root: Path,
+    container_scope: str,
 ) -> dict:
     crash_type, frame = sig
     out_dir = reports_root / f"bug_{idx:02d}"
@@ -1217,7 +1236,9 @@ async def _report_one(
             workspace_dir=str(out_dir / "workspace"),
             upstream_log=log, crash_file=crash_file,
             agent_env=agent_env,
-            container_name=f"report_{target.name}_{idx}",
+            container_name=_container_name(
+                "report", target.name, container_scope, idx
+            ),
             max_turns=args.max_turns,
             transcript_path=str(out_dir / "report_transcript.jsonl"),
             progress_prefix=f"[report:{idx}]",
@@ -1295,7 +1316,7 @@ def _cmd_report(args) -> int:
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)
         return 1
-    _warn_bedrock_model(args.model)
+    _warn_bedrock_model(args.model, getattr(args, "provider", None))
 
     groups = dedup(root)
     if not groups:
@@ -1321,8 +1342,8 @@ def _cmd_report(args) -> int:
     except Exception as e:
         print(f"error: could not load target config for batch: {e}", file=sys.stderr)
         return 1
-    global _current_target_name
-    _current_target_name = target.name
+    container_scope = _container_scope(root)
+    _set_container_cleanup_scope(target.name, container_scope)
 
     # Build if missing — we're likely on a host that already ran find+grade,
     # but `report` may run standalone against a copied results dir.
@@ -1348,7 +1369,10 @@ def _cmd_report(args) -> int:
 
     async def _dispatch():
         tasks = [_ckpt(i) if i in checkpoints
-                 else _report_one(i, sig, ents, target, args, agent_env, reports_root)
+                 else _report_one(
+                     i, sig, ents, target, args, agent_env, reports_root,
+                     container_scope,
+                 )
                  for i, (sig, ents) in enumerate(items)]
         if args.parallel:
             return await asyncio.gather(*tasks, return_exceptions=True)
@@ -1390,7 +1414,7 @@ def _cmd_patch(args) -> int:
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)
         return 1
-    _warn_bedrock_model(args.model)
+    _warn_bedrock_model(args.model, getattr(args, "provider", None))
 
     groups = dedup(root)
     if not groups:
@@ -1414,8 +1438,8 @@ def _cmd_patch(args) -> int:
         print(f"error: target {target.name!r} has no build_command in config.yaml — "
               f"the patch grader needs an in-container rebuild step", file=sys.stderr)
         return 1
-    global _current_target_name
-    _current_target_name = target.name
+    container_scope = _container_scope(root)
+    _set_container_cleanup_scope(target.name, container_scope)
 
     if not docker_ops.image_exists(target.image_tag):
         print(f"[build] Building {target.image_tag} ...")
@@ -1441,7 +1465,9 @@ def _cmd_patch(args) -> int:
                 crash, target, model=args.model, out_dir=out_dir,
                 report_text=report_text,
                 max_iterations=args.max_iterations, max_turns=args.max_turns,
-                container_name=f"patch_{target.name}_{idx}",
+                container_name=_container_name(
+                    "patch", target.name, container_scope, idx
+                ),
                 run_reattack=not args.no_reattack, run_style=args.style,
                 agent_env=agent_env, system_prompt=system_prompt,
                 progress_prefix=f"[patch:bug_{idx:02d}]",

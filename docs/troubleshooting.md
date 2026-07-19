@@ -29,10 +29,11 @@ You should not need to throttle far below provisioned capacity.
 The autonomous fleet supports the Anthropic API, Amazon Bedrock, and Google
 Vertex only. Confirm that the selected `--provider` (or
 `VULN_PIPELINE_PROVIDER`) has credentials available to the launch command and
-that its endpoint was included in `VP_EGRESS_ALLOW` before the sandbox setup
-script ran. The required Bedrock and Vertex endpoints are listed in
-[agent-sandbox.md](agent-sandbox.md#podman). Re-run the setup script after
-changing the allowlist.
+that its endpoint was included in the proxy allowlist created during sandbox
+setup. The setup script derives Bedrock and Vertex endpoints from the provider
+environment unless `VP_EGRESS_ALLOW` explicitly overrides them. Re-run setup
+after changing provider, region, or the override; required credentials and
+hosts are listed in [agent-sandbox.md](agent-sandbox.md#third-party-model-providers-bedrock--vertex).
 
 ## Skill run died mid-way on a large codebase
 

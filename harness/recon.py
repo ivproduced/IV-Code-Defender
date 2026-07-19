@@ -27,13 +27,14 @@ async def run_recon(
     transcript_path: str | None = None,
     progress_prefix: str | None = "[recon]",
     system_prompt: str | None = None,
+    container_name: str | None = None,
 ) -> tuple[list[str], AgentResult]:
     """Explore the target's source and propose a focus-area partition.
 
     Returns (focus_areas, agent_result). focus_areas is empty if the agent
     failed to emit a parseable <focus_areas> tag.
     """
-    container_name = f"recon_{target.name}"
+    container_name = container_name or f"recon_{target.name}"
     with sandbox.agent_container(target.image_tag, container_name, agent_env) as container:
         prompt = build_recon_prompt(
             github_url=target.github_url,

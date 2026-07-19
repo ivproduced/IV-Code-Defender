@@ -49,8 +49,11 @@ start outside that sandbox unless you explicitly pass `--dangerously-no-sandbox`
   an agent that can only read code, while something with stronger isolation
   (e.g., gVisor, Kata Container, Firecracker microVM) should be used for
   running the target.
-- Never mount credential-bearing paths (e.g., `~/.aws`, `.env`) into the
-  agent's environment.
+- Never mount credential-bearing directories or general secret files (e.g.,
+  `~/.aws`, `.env`) into the agent's environment. Vertex is the narrow
+  exception: the launcher mounts only the explicitly configured
+  `GOOGLE_APPLICATION_CREDENTIALS` file read-only at a fixed container path.
+  Use a dedicated, model-invocation-only principal.
 - Don't connect agents to MCP servers or tools that can write to the outside 
   world (prod infrastructure, email, cloud storage).
 - If you're driving the pipeline interactively from Claude Code, rely on the

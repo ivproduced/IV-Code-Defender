@@ -10,6 +10,12 @@ from harness.cli import _resolve_auth_env, NO_AUTH_MSG
 AUTH_VARS = (
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "AWS_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_BEARER_TOKEN_BEDROCK",
 )
 
 
@@ -50,8 +56,8 @@ def test_error_message_names_all_modes():
     assert "CLAUDE_CODE_OAUTH_TOKEN" in NO_AUTH_MSG
 
 
-def test_provider_egress_guidance_names_matching_setup_scripts(capsys):
-    _resolve_auth_env("bedrock")
+def test_explicit_provider_uses_strict_auth_validation(monkeypatch, capsys):
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    assert _resolve_auth_env("bedrock") is None
     err = capsys.readouterr().err
-    assert "scripts/setup_sandbox.sh (Docker)" in err
-    assert "scripts/setup_podman_sandbox.sh (Podman)" in err
+    assert "no credentials" in err

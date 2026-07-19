@@ -102,6 +102,23 @@ def test_agent_container_passes_mounts_through(monkeypatch):
     assert captured["env"]["ANTHROPIC_API_KEY"] == "k"
 
 
+def test_agent_container_mounts_only_vertex_credential_file(monkeypatch, tmp_path):
+    credentials = tmp_path / "vertex.json"
+    credentials.write_text("{}")
+    captured = _capture_run(monkeypatch)
+    with sandbox.agent_container(
+        "img:v1",
+        "c",
+        {"GOOGLE_APPLICATION_CREDENTIALS": str(credentials)},
+    ):
+        pass
+    assert captured["env"]["GOOGLE_APPLICATION_CREDENTIALS"] == \
+        sandbox.VERTEX_CREDENTIAL_PATH
+    assert captured["mounts"] == [
+        (str(credentials.resolve()), sandbox.VERTEX_CREDENTIAL_PATH)
+    ]
+
+
 def test_agent_container_network_default_tracks_sandbox(monkeypatch):
     """No override → the sandbox default (vp-internal under gVisor, bridge
     without)."""
@@ -131,13 +148,13 @@ def test_agent_container_network_override(monkeypatch):
         assert captured["network"] == "none"
 
 
-def test_agent_base_image_ships_prompted_tools():
+def test_agent_image_ships_prompted_tools():
     """find/patch prompts list ``xxd`` and ``gdb`` as available; they aren't
     in ``gcc:14`` and the agent image only inherits ``/work`` from the target
-    Dockerfile, so the agent base layer must install them itself."""
+    Dockerfile, so the generated agent layer must install them itself."""
     import inspect
     from harness import agent_image
 
-    src = inspect.getsource(agent_image._ensure_base)
+    src = inspect.getsource(agent_image.ensure)
     for tool in ("xxd", "gdb"):
         assert tool in src, f"{tool} missing from agent base image apt-get"

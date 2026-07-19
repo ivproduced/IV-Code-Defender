@@ -84,14 +84,13 @@ uses `runsc` per container, creates the same internal `vp-internal` network and
 allowlist proxy as Docker, then validates gVisor, filesystem isolation, and
 network egress. Use `scripts/setup_sandbox.sh` for Docker.
 
-The proxy only allows traffic to `api.anthropic.com:443` by default. Before
-using a custom Anthropic endpoint, Bedrock, or Vertex, set
-`VP_EGRESS_ALLOW=host-1:443,host-2:443` as a comma-separated allowlist before
-running the setup script. Bedrock needs both
-`bedrock-runtime.<region>.amazonaws.com:443` and
-`bedrock.<region>.amazonaws.com:443`; Vertex needs
-`<region>-aiplatform.googleapis.com:443`. If you need to change this
-allowlist later, re-run the script to recreate the proxy.
+The proxy only allows traffic to `api.anthropic.com:443` by default. When the
+provider environment is configured before `setup_sandbox.sh`, its required
+endpoints are derived automatically. Bedrock needs
+`bedrock-runtime.<region>.amazonaws.com:443`; Vertex needs both
+`<region>-aiplatform.googleapis.com:443` and `oauth2.googleapis.com:443`.
+`VP_EGRESS_ALLOW=host-1:443,host-2:443` remains available as an explicit
+override. Re-run the setup script after changing provider, region, or override.
 
 ### Third-party model providers (Bedrock / Vertex)
 
@@ -132,11 +131,15 @@ auto-derived as `bedrock-runtime.<region>.amazonaws.com:443`; re-run
 `setup_sandbox.sh` after changing provider or region so the proxy is rebuilt
 with the right host.
 
-**Google Vertex AI.** Env passthrough is wired (`CLAUDE_CODE_USE_VERTEX=1`,
-`ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`) but egress is **not**
-auto-derived — set `VP_EGRESS_ALLOW` explicitly before setup, e.g.
-`VP_EGRESS_ALLOW="${CLOUD_ML_REGION}-aiplatform.googleapis.com:443,oauth2.googleapis.com:443"`.
-Vertex support is currently untested.
+**Google Vertex AI.** Set `CLAUDE_CODE_USE_VERTEX=1`,
+`ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, and
+`GOOGLE_APPLICATION_CREDENTIALS` pointing to a narrowly scoped service-account
+JSON file. The pipeline mounts exactly that file read-only at a fixed path in
+agent containers; it never mounts the surrounding directory or the user's
+gcloud configuration. The setup derives the Vertex API and OAuth egress hosts
+automatically. Credentials are visible to the in-sandbox agent process, so use
+a dedicated principal restricted to model invocation and validate the canary
+path in your deployment before starting a long batch.
 
 **Azure** is not yet wired.
 

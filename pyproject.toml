@@ -1,7 +1,8 @@
 [project]
 name = "vuln-pipeline"
 version = "0.2.1"
-description = "Execution-verified vulnerability discovery pipeline for C/C++ targets"
+description = "Sandboxed, execution-verified vulnerability discovery for C/C++ and web targets"
+readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 dependencies = [

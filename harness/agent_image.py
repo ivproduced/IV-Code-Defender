@@ -1,12 +1,11 @@
 # Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
-"""Build the per-target agent image: target runtime + claude CLI.
+"""Build a per-target agent image by layering the pinned Claude CLI and
+debugging tools onto the complete target image.
 
-The agent runs *inside* its container, so the container needs the CLI. To
-avoid one node+npm install per target, ``ensure()`` builds a shared
-``vuln-pipeline-agent-base:<cli-version>`` once (gcc:14 + node + pinned CLI)
-and then layers each target's ``/work`` on top via ``COPY --from``. Target
-Dockerfiles stay unchanged (single source of truth for the binary build).
+Keeping the target image as the base preserves runtime libraries installed
+outside ``/work`` while leaving target Dockerfiles as the single source of
+truth for the instrumented build.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ import textwrap
 from . import docker_ops
 
 CLAUDE_CODE_VERSION = "2.1.144"  # bump alongside the dev-env CLI pin
-BASE_TAG = f"vuln-pipeline-agent-base:{CLAUDE_CODE_VERSION}"
 _TAG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/:-]*$")
 
 
@@ -40,27 +38,6 @@ def _build(dockerfile: str, tag: str) -> None:
             capture_output=True,
             text=True,
         )
-
-
-def _ensure_base() -> str:
-    if docker_ops.image_exists(BASE_TAG):
-        return BASE_TAG
-    # xxd + gdb: the find/patch prompts list these as available. Target
-    # Dockerfiles install them too, but ``ensure()`` only copies /work from the
-    # target image — apt packages outside /work don't survive the COPY --from.
-    # Anything the prompts promise has to live in this base layer.
-    _build(
-        textwrap.dedent(f"""\
-            FROM gcc:14
-            RUN apt-get update && \\
-                apt-get install -y --no-install-recommends nodejs npm ca-certificates xxd gdb && \\
-                rm -rf /var/lib/apt/lists/* && \\
-                npm install -g @anthropic-ai/claude-code@{CLAUDE_CODE_VERSION}
-            WORKDIR /work
-        """),
-        BASE_TAG,
-    )
-    return BASE_TAG
 
 
 @functools.lru_cache(maxsize=None)

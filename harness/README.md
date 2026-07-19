@@ -1,10 +1,10 @@
 # Harness: autonomous vulnerability discovery
 
 This package is the reference pipeline: an autonomous, multi-agent harness
-for finding, verifying, reporting, and patching memory-safety bugs in C/C++
-codebases. It runs Claude Code agents inside gVisor-isolated containers,
-builds ASAN-instrumented targets, and grades every finding with an
-executable oracle (the PoC crashes, or it doesn't).
+for finding, verifying, reporting, and patching ASAN-detected memory-safety
+bugs in C/C++ codebases and Docker-replayable findings in Python, Node, and
+React web targets. It runs Claude Code agents inside gVisor-isolated
+containers and independently replays every submitted artifact.
 
 This README is the copy-paste path to a demo. For the architecture, every
 CLI flag, and rate-limit math, see [`docs/pipeline.md`](../docs/pipeline.md).
@@ -52,10 +52,10 @@ export VULN_PIPELINE_MODEL=<model-id>      # Claude Opus recommended; override p
 ```
 
 For Bedrock or Vertex, set `--provider bedrock` or `--provider vertex` on
-agent-spawning commands and configure its credentials and egress allowlist
-before running the setup script. See
-[`docs/agent-sandbox.md`](../docs/agent-sandbox.md#podman) for the required
-hosts.
+agent-spawning commands and configure its credentials before running the
+setup script. The setup derives the required provider egress endpoints. See
+[`docs/agent-sandbox.md`](../docs/agent-sandbox.md#third-party-model-providers-bedrock--vertex)
+for the required credentials and hosts.
 
 ### Run (end to end)
 
@@ -166,8 +166,9 @@ has its own `targets/<name>/README.md`.
 
 ## Port to your stack
 
-The C/C++/ASAN specifics live in `prompts/`, `asan.py`, and
-`patch_grade.py:_t1_passes()`. The orchestration (`cli.py`, `find.py`,
-`grade.py`, `report.py`) is mostly domain-neutral. See
+Profile-specific evidence contracts live in `profiles.py`; the C/C++/ASAN
+parsing specifics also use `asan.py` and `patch_grade.py:_t1_passes()`.
+The orchestration (`cli.py`, `find.py`, `grade.py`, `report.py`) remains
+mostly domain-neutral. See
 [`docs/customizing.md`](../docs/customizing.md), or run `/customize` in
 Claude Code from the repo root.

@@ -29,8 +29,9 @@ bin/vp-sandboxed patch results/drlibs/<timestamp>/ --model <model-id>
 
 The default provider is the Anthropic API. Amazon Bedrock and Google Vertex
 are also supported: pass `--provider bedrock` or `--provider vertex` (or set
-`VULN_PIPELINE_PROVIDER`) and configure the corresponding credentials and
-egress allowlist described in [agent-sandbox.md](agent-sandbox.md#podman).
+`VULN_PIPELINE_PROVIDER`) and configure the corresponding credentials before
+sandbox setup. Provider egress is derived and verified automatically; see
+[agent-sandbox.md](agent-sandbox.md#third-party-model-providers-bedrock--vertex).
 
 Start with a small wave like this one to get a feel for how the pipeline works
 and the token burn before scaling up. Results land in `results/<target>/<timestamp>/`.

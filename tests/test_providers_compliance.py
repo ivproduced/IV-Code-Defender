@@ -22,16 +22,22 @@ def test_explicit_over_env(monkeypatch):
 def test_bedrock_env(monkeypatch):
     monkeypatch.setenv("AWS_REGION", "us-west-2")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "k")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
     pe = providers.resolve_provider_env("bedrock")
     assert pe.env["CLAUDE_CODE_USE_BEDROCK"] == "1"
     assert "bedrock-runtime.us-west-2.amazonaws.com:443" in pe.egress_hosts
 
 
-def test_vertex_env(monkeypatch):
+def test_vertex_env(monkeypatch, tmp_path):
+    credentials = tmp_path / "vertex.json"
+    credentials.write_text("{}")
     monkeypatch.setenv("CLOUD_ML_REGION", "europe-west4")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "proj-123")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(credentials))
     pe = providers.resolve_provider_env("vertex")
     assert pe.env["CLAUDE_CODE_USE_VERTEX"] == "1"
     assert "europe-west4-aiplatform.googleapis.com:443" in pe.egress_hosts
+    assert "oauth2.googleapis.com:443" in pe.egress_hosts
 
 
 @pytest.mark.parametrize("p", ["openai", "azure", "ollama"])
