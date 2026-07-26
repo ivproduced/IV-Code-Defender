@@ -52,7 +52,7 @@ Example:
 <focus_areas>
 Alpha parser (parse_alpha) — heap allocation with input-controlled copy length
 Bravo parser (parse_bravo) — fixed stack buffer, unbounded copy
-Charlie parser (parse_charlie) — conditional early-free with fall-through
+Charlie parser (parse_charlie) — two-byte record with sentinel id handling
 </focus_areas>
 
 Emit the tag once. Do not send further messages after.
