@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from harness.agent import AgentResult
 from harness.artifacts import CrashArtifact, PatchVerdict
 from harness.config import TargetConfig
 from harness.patch_grade import _t1_passes, grade_patch
@@ -301,11 +302,28 @@ def test_reattack_clean_when_no_crash(mock_docker):
         ]
     )
     with patch(
-        "harness.patch_grade.run_find", new=AsyncMock(return_value=(None, None, {}))
+        "harness.patch_grade.run_find",
+        new=AsyncMock(return_value=(None, AgentResult(), {})),
     ):
         v = asyncio.run(grade_patch(CANARY, ALPHA_CRASH, DIFF, model="m"))
     assert v.re_attack_clean
     assert v.passed
+
+
+def test_reattack_agent_failure_rejects_patch(mock_docker):
+    mock_docker.exec_sh.side_effect = _exec_sequence(
+        [(0, "", ""), (0, "", ""), (0, "ok", "")]
+    )
+    with patch(
+        "harness.patch_grade.run_find",
+        new=AsyncMock(return_value=(
+            None, AgentResult(error="API unavailable after retries"), {},
+        )),
+    ):
+        verdict = asyncio.run(grade_patch(CANARY, ALPHA_CRASH, DIFF, model="m"))
+    assert verdict.re_attack_clean is False
+    assert not verdict.passed
+    assert "API unavailable" in verdict.evidence["re_attack"]
 
 
 def test_reattack_dirty_when_same_signature(mock_docker):
@@ -326,7 +344,7 @@ def test_reattack_dirty_when_same_signature(mock_docker):
     )
     with patch(
         "harness.patch_grade.run_find",
-        new=AsyncMock(return_value=(same_crash, None, {})),
+        new=AsyncMock(return_value=(same_crash, AgentResult(), {})),
     ):
         v = asyncio.run(grade_patch(CANARY, ALPHA_CRASH, DIFF, model="m"))
     assert not v.re_attack_clean
@@ -352,7 +370,7 @@ def test_reattack_any_crash_fails(mock_docker):
     )
     with patch(
         "harness.patch_grade.run_find",
-        new=AsyncMock(return_value=(other_crash, None, {})),
+        new=AsyncMock(return_value=(other_crash, AgentResult(), {})),
     ):
         v = asyncio.run(grade_patch(CANARY, ALPHA_CRASH, DIFF, model="m"))
     assert v.re_attack_clean is False

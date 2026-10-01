@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import docker_ops, sandbox
+from .io_utils import open_private_text
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -205,7 +207,9 @@ def build_claude_argv(
     system_prompt: str | None = None,
 ) -> list[str]:
     """Build the argv passed to the in-container Claude CLI."""
-    effective_tools = tools if tools else DEFAULT_TOOLS
+    # ``None`` means the normal agent tool set; an explicit empty list means
+    # no tools. Treating [] as falsy accidentally gave judge/grader agents Bash.
+    effective_tools = DEFAULT_TOOLS if tools is None else tools
     argv = [
         *cli_argv, "-p", "--verbose",
         "--output-format", "stream-json",
@@ -266,7 +270,7 @@ async def run_agent(
     assistant_count = 0
     tool_call_count = 0
 
-    transcript_file = open(transcript_path, "w") if transcript_path else None
+    transcript_file = open_private_text(transcript_path, "w") if transcript_path else None
     try:
         while True:
             cmd = build_claude_argv(
@@ -279,16 +283,20 @@ async def run_agent(
             )
             if attempt > 0 and result.session_id:
                 cmd += ["--resume", result.session_id, "continue"]
+                prompt_stdin: bytes | None = None
             else:
-                cmd += [prompt]
+                # Keep target-derived prompts out of host process listings.
+                # Bounded parallelism prevents the high-fanout stdin startup
+                # starvation that originally motivated putting prompts in argv.
+                prompt_stdin = prompt.encode("utf-8")
 
-            # Prompt goes in argv, not stdin. Under high-parallel launch (25+
-            # concurrent create_subprocess_exec), event-loop churn can delay
-            # stdin delivery past the CLI's 3s timeout. ARG_MAX (~2MB on Linux)
-            # comfortably fits the largest pipeline prompts.
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=(
+                    asyncio.subprocess.PIPE
+                    if prompt_stdin is not None
+                    else asyncio.subprocess.DEVNULL
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 # Default 64KB limit trips on large tool results (e.g. recon
@@ -297,6 +305,12 @@ async def run_agent(
                 limit=16 * 1024 * 1024,
             )
             assert proc.stdout
+            if prompt_stdin is not None:
+                assert proc.stdin
+                proc.stdin.write(prompt_stdin)
+                await proc.stdin.drain()
+                proc.stdin.close()
+                await proc.stdin.wait_closed()
 
             try:
                 async for raw in proc.stdout:
@@ -316,6 +330,7 @@ async def run_agent(
                             json.dumps(_truncate_tool_results(msg)) + "\n"
                         )
                         transcript_file.flush()
+                        os.fsync(transcript_file.fileno())
 
                     mtype = msg.get("type")
                     if mtype == "assistant":

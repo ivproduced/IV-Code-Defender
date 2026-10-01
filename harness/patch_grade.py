@@ -203,7 +203,7 @@ async def grade_patch(
                 focus = reattack_focus or _focus_hint(
                     crash, target.source_root if reattack_with_diff else None
                 )
-                re_crash, _, _ = await run_find(
+                re_crash, re_result, _ = await run_find(
                     patched_target,
                     model=model,
                     max_turns=REATTACK_MAX_TURNS,
@@ -220,7 +220,12 @@ async def grade_patch(
                     max_resume_attempts=1,
                 )
                 timings["re_attack"] = time.time() - s
-                if re_crash is None:
+                if re_result.error:
+                    re_clean = False
+                    evidence["re_attack"] = _clip(
+                        f"re-attack agent failed: {re_result.error}"
+                    )
+                elif re_crash is None:
                     re_clean = True
                 else:
                     re_clean = False
