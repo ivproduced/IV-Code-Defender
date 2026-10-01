@@ -35,9 +35,9 @@ def agent_tag(target_tag: str) -> str:
     return f"{target_tag.replace(':', '-')}-agent:{CLAUDE_CODE_VERSION}"
 
 
-def _agent_dockerfile(target_tag: str) -> str:
+def _agent_dockerfile(base_image: str) -> str:
     return textwrap.dedent(f"""\
-        FROM {target_tag}
+        FROM {base_image}
         USER root
         RUN apt-get update && \\
             apt-get install -y --no-install-recommends nodejs npm ca-certificates xxd gdb && \\
@@ -47,14 +47,14 @@ def _agent_dockerfile(target_tag: str) -> str:
     """)
 
 
-def _backend_dockerfile(target_tag: str, backend: str) -> str:
+def _backend_dockerfile(base_image: str, backend: str) -> str:
     if backend == "claude":
-        return _agent_dockerfile(target_tag)
+        return _agent_dockerfile(base_image)
     package = (f"@openai/codex@{CODEX_VERSION}" if backend in ("codex", "ollama")
                else f"@google/gemini-cli@{GEMINI_VERSION}")
     return textwrap.dedent(f"""\
         FROM node:22-bookworm-slim AS node
-        FROM {target_tag}
+        FROM {base_image}
         USER root
         RUN apt-get update && \\
             apt-get install -y --no-install-recommends ca-certificates xxd gdb && \\
@@ -65,12 +65,19 @@ def _backend_dockerfile(target_tag: str, backend: str) -> str:
             npm install -g {package}
         WORKDIR /work
     """)
+
+
+def _base_image_tag(target_image_id: str) -> str:
+    """Name an exact local image without depending on its mutable target tag."""
+    digest = target_image_id.removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        raise ValueError(f"invalid target image ID: {target_image_id!r}")
+    return f"vuln-pipeline-agent-base:{digest.lower()}"
 def _digest_tag(target_tag: str, target_image_id: str) -> str:
     digest = target_image_id.removeprefix("sha256:")
-    if not re.fullmatch(r"[0-9a-fA-F]{12,}", digest):
-        raise ValueError(f"invalid target image ID: {target_image_id!r}")
+    base_tag = _base_image_tag(target_image_id)
     recipe = hashlib.sha256(
-        _agent_dockerfile(target_tag).encode("utf-8")
+        _agent_dockerfile(base_tag).encode("utf-8")
     ).hexdigest()[:12]
     base = agent_tag(target_tag).rsplit(":", 1)[0]
     return f"{base}:{CLAUDE_CODE_VERSION}-{digest[:16].lower()}-{recipe}"
@@ -106,7 +113,9 @@ def _ensure_for_image(target_tag: str, target_image_id: str) -> str:
         raise ValueError(f"invalid image tag: {target_tag!r}")
     tag = _digest_tag(target_tag, target_image_id)
     if not docker_ops.image_exists(tag):
-        _build(_agent_dockerfile(target_tag), tag)
+        base_tag = _base_image_tag(target_image_id)
+        docker_ops.tag(target_image_id, base_tag)
+        _build(_agent_dockerfile(base_tag), tag)
     _tag_aliases(tag, target_tag)
     return tag
 
@@ -125,13 +134,15 @@ def _ensure_backend_image(target_tag: str, target_image_id: str, backend: str) -
     if not _TAG_RE.match(target_tag):
         raise ValueError(f"invalid image tag: {target_tag!r}")
     digest = target_image_id.removeprefix("sha256:")
-    if not re.fullmatch(r"[0-9a-fA-F]{12,}", digest):
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
         raise ValueError(f"invalid target image ID: {target_image_id!r}")
-    recipe = _backend_dockerfile(target_tag, backend)
+    base_tag = _base_image_tag(target_image_id)
+    recipe = _backend_dockerfile(base_tag, backend)
     recipe_digest = hashlib.sha256(recipe.encode()).hexdigest()[:12]
     base = agent_tag(target_tag).rsplit(":", 1)[0]
     tag = f"{base}-{backend}:{digest[:16].lower()}-{recipe_digest}"
     if not docker_ops.image_exists(tag):
+        docker_ops.tag(target_image_id, base_tag)
         _build(recipe, tag)
     _tag_aliases(tag, target_tag)
     return tag
