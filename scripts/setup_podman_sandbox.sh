@@ -85,7 +85,7 @@ ok "target + agent images built"
 
 step "Verification"
 ATAG=$(.venv/bin/python3 \
-    -c 'import yaml; from harness.agent_image import agent_tag; t=agent_tag(yaml.safe_load(open("targets/canary/config.yaml"))["image_tag"]); print(t.rsplit(":", 1)[0] + ":latest")')
+    -c 'import yaml; from harness.agent_image import latest_tag; print(latest_tag(yaml.safe_load(open("targets/canary/config.yaml"))["image_tag"]))')
 host_kver=$(uname -r)
 guest_kver=$(sudo podman run --rm --runtime=runsc "$ATAG" uname -r) \
     || die "runsc container failed"
