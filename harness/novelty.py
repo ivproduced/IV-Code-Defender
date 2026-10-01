@@ -107,10 +107,11 @@ def _validated_upstream_url(value: str) -> str:
 
 
 def _ensure_clone(github_url: str, repo_dir: Path) -> tuple[bool, str]:
-    """Clone if missing, fetch if present. Partial clone (blobless) for speed."""
+    """Clone if missing, fetch if present, without following HTTP redirects."""
     if (repo_dir / ".git").is_dir():
         r = subprocess.run(
-            ["git", "-C", str(repo_dir), "fetch", "--quiet", "origin", "HEAD"],
+            ["git", "-c", "http.followRedirects=false", "-C", str(repo_dir),
+             "fetch", "--quiet", "origin", "HEAD"],
             capture_output=True, text=True, timeout=120,
         )
         if r.returncode != 0:
@@ -119,7 +120,8 @@ def _ensure_clone(github_url: str, repo_dir: Path) -> tuple[bool, str]:
 
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(
-        ["git", "clone", "--quiet", "--filter=blob:none", github_url, str(repo_dir)],
+        ["git", "-c", "http.followRedirects=false", "clone", "--quiet",
+         "--filter=blob:none", github_url, str(repo_dir)],
         capture_output=True, text=True, timeout=300,
     )
     if r.returncode != 0:

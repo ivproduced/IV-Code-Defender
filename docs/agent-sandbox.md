@@ -107,8 +107,12 @@ Find-agent credentials are visible inside the same sandbox that executes the
 target, so hostile target code must be assumed capable of reading them. The
 network allowlist prevents general exfiltration but does not prevent abuse
 against the approved model endpoint. Use a dedicated invocation-only principal
-with a short lifetime and a hard spend/quota limit. The machine replay grader
-runs separately with no credentials and no network.
+with a short lifetime and a hard spend/quota limit. The pipeline-owned crash
+replay runs in a separate container with no credentials or network. After that
+replay, a no-tools semantic grader runs in a different container with model
+credentials and API egress; it receives the captured evidence but does not
+execute the reproduction command. The T0–T2 patch grader also runs without
+credentials or network. Do not treat the entire grading phase as credential-free.
 `AWS_PROFILE` and `~/.aws` are **not** forwarded (the sandbox never mounts
 credential files), so credentials must be in the environment. For multi-hour
 batch runs, use long-lived keys or session tokens with ≥12h TTL.
@@ -153,7 +157,9 @@ overrides only; auto-derived defaults never use wildcards.
 
 The optional host-side novelty check accepts credential-free HTTPS clone URLs
 on `github.com` only. Self-hosted Git services must be explicitly listed in
-`VULN_PIPELINE_NOVELTY_HOSTS` as a comma-separated hostname allowlist.
+`VULN_PIPELINE_NOVELTY_HOSTS` as a comma-separated hostname allowlist. Both
+clone and fetch reject HTTP redirects, so an approved host cannot redirect
+the orchestrator to a host outside that allowlist.
 
 The script downloads a pinned `runsc` release. Set `RUNSC_RELEASE=<yyyymmdd>`
 to use a different one.
