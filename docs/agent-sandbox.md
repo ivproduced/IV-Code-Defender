@@ -31,6 +31,15 @@ Agent containers are attached to a Docker network (`vp-internal`) that has no
 connection to the internet. The egress route is through a small proxy container
 on the same network, which only forwards traffic to the model API.
 
+Model credentials and API egress are present in the find, recon, report, and
+semantic grade agent containers. Their agent images inherit the target image.
+The launcher clears an inherited `ENTRYPOINT` and starts `/bin/bash` explicitly,
+so a target-supplied entrypoint does not run on container startup. This does not
+make those containers safe from target-controlled code: the target image can
+also supply the shell, startup files, libraries, and other executables that run
+with the credentials. Use narrowly scoped, short-lived model credentials even
+for the no-tools semantic grader.
+
 ## One-time setup
 
 Run this once per Linux VM. It needs `sudo` (to install a new OCI runtime and
@@ -111,8 +120,10 @@ with a short lifetime and a hard spend/quota limit. The pipeline-owned crash
 replay runs in a separate container with no credentials or network. After that
 replay, a no-tools semantic grader runs in a different container with model
 credentials and API egress; it receives the captured evidence but does not
-execute the reproduction command. The T0–T2 patch grader also runs without
-credentials or network. Do not treat the entire grading phase as credential-free.
+execute the reproduction command. Its target-derived image can still execute
+other target-controlled code with those credentials, as described above. The
+T0–T2 patch grader also runs without credentials or network. Do not treat the
+entire grading phase as credential-free.
 `AWS_PROFILE` and `~/.aws` are **not** forwarded (the sandbox never mounts
 credential files), so credentials must be in the environment. For multi-hour
 batch runs, use long-lived keys or session tokens with ≥12h TTL.

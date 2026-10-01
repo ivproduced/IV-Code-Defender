@@ -71,7 +71,9 @@ def run(
 
     ``runtime`` selects an OCI runtime (e.g. ``runsc`` for gVisor). The
     active runtime is verified via ``docker inspect`` so a typo or missing
-    registration fails loudly instead of silently falling back to runc."""
+    registration fails loudly instead of silently falling back to runc.
+    The image's ENTRYPOINT is cleared because this function always starts
+    ``shell`` explicitly."""
     subprocess.run(command("rm", "-f", name), capture_output=True)
     runtime = runtime or os.environ.get("VULN_PIPELINE_DOCKER_RUNTIME")
     extra: list[str] = []
@@ -83,6 +85,9 @@ def run(
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true",
         "--pids-limit", str(pids_limit),
+        # Every caller starts its own shell. Do not run a target image's
+        # inherited ENTRYPOINT with model credentials before that shell.
+        "--entrypoint", "",
     ]
     if shm_size:
         extra += ["--shm-size", shm_size]

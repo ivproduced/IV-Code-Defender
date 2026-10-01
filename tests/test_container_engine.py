@@ -90,6 +90,10 @@ def test_run_applies_least_privilege_defaults(monkeypatch):
     assert ["--pids-limit", "512"] == command[
         command.index("--pids-limit"):command.index("--pids-limit") + 2
     ]
+    assert command[command.index("--entrypoint"):command.index("--entrypoint") + 2] == [
+        "--entrypoint", ""
+    ]
+    assert command[-2:] == ["image:tag", "/bin/bash"]
 
 
 def test_container_names_are_namespaced_by_results_batch(tmp_path):
