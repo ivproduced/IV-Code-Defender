@@ -18,10 +18,10 @@ import subprocess
 
 import pytest
 
-from harness.agent_image import agent_tag
+from harness.agent_image import latest_tag
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-ATAG = agent_tag("vuln-pipeline-canary:latest")
+ATAG = latest_tag("vuln-pipeline-canary:latest")
 NET = "vp-internal"
 PROXY = "vp-egress-proxy"
 

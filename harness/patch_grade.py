@@ -196,7 +196,7 @@ async def grade_patch(
             else:
                 s = time.time()
                 patched_tag = (
-                    f"{target.image_tag.split(':')[0]}:patched-{uuid.uuid4().hex[:8]}"
+                    f"vuln-pipeline-patched:patch-{uuid.uuid4().hex[:12]}"
                 )
                 await asyncio.to_thread(docker_ops.commit, container, patched_tag)
                 patched_target = replace(target, image_tag=patched_tag)

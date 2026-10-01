@@ -123,7 +123,7 @@ ok "target + agent images built"
 step "Verification"
 # Derive the same agent-image tag agent_image.ensure() produced in step 4
 # (e.g. vuln-pipeline-canary-latest-agent:latest). Hardcoding drifts.
-ATAG=$(.venv/bin/python3 -c 'import sys, yaml; from harness.agent_image import agent_tag; t=agent_tag(yaml.safe_load(open(sys.argv[1]))["image_tag"]); print(t.rsplit(":", 1)[0] + ":latest")' targets/canary/config.yaml)
+ATAG=$(.venv/bin/python3 -c 'import sys, yaml; from harness.agent_image import latest_tag; print(latest_tag(yaml.safe_load(open(sys.argv[1]))["image_tag"]))' targets/canary/config.yaml)
 host_kver=$(uname -r)
 
 # The first container doubles as a cgroup probe. runsc writes cgroup files

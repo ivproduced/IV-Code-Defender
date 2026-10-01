@@ -41,6 +41,7 @@ import sys
 import time
 import traceback
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 
 from . import docker_ops, providers, sandbox, compliance
@@ -51,6 +52,7 @@ from .config import TargetConfig
 from .dedup import dedup
 from .find import run_find, DEFAULT_FIND_MAX_TURNS
 from .grade import run_grade
+from .io_utils import atomic_write_json
 from .judge import run_judge, run_compare
 from .profiles import is_web
 from .novelty import upstream_log, crash_file_from_frame, NOVELTY_NOT_CHECKED
@@ -735,7 +737,22 @@ async def _run_all(
             error=f"{type(e).__name__}: {e}",
         )
         return [(results_root, err)]
-    print(f"[build] done in {time.time() - t0:.1f}s")
+    target_image_id = docker_ops.image_id(target.image_tag)
+    print(f"[build] done in {time.time() - t0:.1f}s ({target_image_id[:23]})")
+
+    metadata_error = _record_or_verify_batch_image(
+        results_root, target, target_image_id, is_resume=bool(args.resume)
+    )
+    if metadata_error:
+        err = RunResult(
+            target=target.name, status="build_failed", crash=None, verdict=None,
+            error=metadata_error,
+        )
+        return [(results_root, err)]
+    # Never dereference the mutable configured tag again during this batch.
+    # Concurrent batches may rebuild that tag; the image ID remains immutable.
+    frozen_tag = _freeze_target_image(target, target_image_id)
+    target = replace(target, image_tag=frozen_tag)
 
     # ── Focus areas (optional auto-discover via recon) ───────────────────────────
     # focus_areas.json is the checkpoint of record: written on every fresh run,
@@ -875,6 +892,93 @@ async def _run_all(
         await asyncio.gather(*stream_ctx["report_tasks"], return_exceptions=True)
 
     return list(zip(out_dirs, results))
+
+
+def _record_or_verify_batch_image(
+    results_root: Path,
+    target: TargetConfig,
+    target_image_id: str,
+    *,
+    is_resume: bool,
+) -> str | None:
+    """Pin a batch to the exact target image used for discovery and grading."""
+    metadata_path = results_root / "batch_metadata.json"
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            return f"batch metadata is unreadable: {exc}"
+        return _batch_metadata_mismatch(metadata, target, target_image_id, "resume")
+
+    atomic_write_json(metadata_path, {
+        "schema_version": 1,
+        "target": target.name,
+        "target_image_tag": target.image_tag,
+        "target_image_id": target_image_id,
+        "source_commit": target.commit,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "legacy_resume_without_prior_metadata": is_resume,
+    })
+    if is_resume:
+        print(
+            "[resume] warning: legacy batch had no image metadata; "
+            "pinning it to the current build"
+        )
+    return None
+
+
+def _batch_metadata_mismatch(
+    metadata: object, target: TargetConfig, image_id: str, context: str
+) -> str | None:
+    """Reject a batch created for another target, source commit, or image."""
+    if not isinstance(metadata, dict):
+        return "batch metadata must be a JSON object"
+    for field, current in (
+        ("target", target.name),
+        ("source_commit", target.commit),
+        ("target_image_id", image_id),
+    ):
+        expected = metadata.get(field)
+        if expected != current:
+            label = "image" if field == "target_image_id" else field.replace("_", " ")
+            return (
+                f"{context} {label} mismatch: batch used {expected!r}, "
+                f"current target uses {current!r}"
+            )
+    return None
+
+
+def _pin_target_for_existing_batch(
+    results_root: Path, target: TargetConfig
+) -> tuple[TargetConfig | None, str | None]:
+    """Resolve a standalone report/patch command to the batch's exact image."""
+    if not docker_ops.image_exists(target.image_tag):
+        print(f"[build] Building {target.image_tag} ...")
+        docker_ops.build(target.dockerfile_dir, target.image_tag)
+    current_id = docker_ops.image_id(target.image_tag)
+    metadata_path = results_root / "batch_metadata.json"
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            return None, f"batch metadata is unreadable: {exc}"
+        if error := _batch_metadata_mismatch(metadata, target, current_id, "batch"):
+            return None, error
+    frozen_tag = _freeze_target_image(target, current_id)
+    return replace(target, image_tag=frozen_tag), None
+
+
+def _freeze_target_image(target: TargetConfig, image_id: str) -> str:
+    """Give a content-addressed local image a batch-stable Docker reference."""
+    digest = image_id.removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        raise ValueError(f"invalid target image ID: {image_id!r}")
+    safe_name = (
+        re.sub(r"[^a-z0-9._-]+", "-", target.name.lower()).strip("-")
+        or "target"
+    )
+    frozen_tag = f"vuln-pipeline-frozen-{safe_name}:{digest}"
+    return docker_ops.tag(image_id, frozen_tag)
 
 
 def main() -> int:
@@ -1346,11 +1450,11 @@ def _cmd_report(args) -> int:
     container_scope = _container_scope(root)
     _set_container_cleanup_scope(target.name, container_scope)
 
-    # Build if missing — we're likely on a host that already ran find+grade,
-    # but `report` may run standalone against a copied results dir.
-    if not docker_ops.image_exists(target.image_tag):
-        print(f"[build] Building {target.image_tag} ...")
-        docker_ops.build(target.dockerfile_dir, target.image_tag)
+    target, pin_error = _pin_target_for_existing_batch(root, target)
+    if pin_error:
+        print(f"error: {pin_error}", file=sys.stderr)
+        return 1
+    assert target is not None
 
     reports_root = root / "reports"
     checkpoints: dict[int, dict] = {}
@@ -1442,9 +1546,11 @@ def _cmd_patch(args) -> int:
     container_scope = _container_scope(root)
     _set_container_cleanup_scope(target.name, container_scope)
 
-    if not docker_ops.image_exists(target.image_tag):
-        print(f"[build] Building {target.image_tag} ...")
-        docker_ops.build(target.dockerfile_dir, target.image_tag)
+    target, pin_error = _pin_target_for_existing_batch(root, target)
+    if pin_error:
+        print(f"error: {pin_error}", file=sys.stderr)
+        return 1
+    assert target is not None
 
     reports_root = root / "reports"
     system_prompt = build_system_prompt(args.engagement_context)
