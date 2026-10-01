@@ -42,9 +42,9 @@ static void parse_bravo(const unsigned char *buf, size_t len) {
     printf("bravo: name=%.15s\n", name);
 }
 
-// ─── Parser C: heap-use-after-free ───────────────────────────────────────────
-// Frees early on a sentinel value, then writes through the dangling pointer.
-// ASAN: heap-use-after-free (WRITE).
+// ─── Parser C: record parser ─────────────────────────────────────────────────
+// Parses a two-byte record: id byte and value byte.
+// Returns early (without writing value) when id is the sentinel 0xff.
 struct record { int id; int value; };
 
 __attribute__((noinline))
@@ -54,12 +54,12 @@ static void parse_charlie(const unsigned char *buf, size_t len) {
     if (!r) return;
     r->id = buf[0];
     if (r->id == 0xff) {
-        // Bug: early-free path doesn't return; falls through to the write below.
         free(r);
+        return;
     }
-    r->value = buf[1];  // UAF when id == 0xff
+    r->value = buf[1];
     printf("charlie: id=%d value=%d\n", r->id, r->value);
-    if (r->id != 0xff) free(r);
+    free(r);
 }
 
 // ─── Dispatch ────────────────────────────────────────────────────────────────
