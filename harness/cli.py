@@ -52,7 +52,14 @@ from .config import TargetConfig
 from .dedup import dedup
 from .find import run_find, DEFAULT_FIND_MAX_TURNS
 from .grade import run_grade
-from .io_utils import atomic_write_json
+from .io_utils import (
+    append_jsonl,
+    atomic_write_bytes,
+    atomic_write_json,
+    atomic_write_text,
+    exclusive_lock,
+    ResultsLockError,
+)
 from .judge import run_judge, run_compare
 from .profiles import is_web
 from .novelty import upstream_log, crash_file_from_frame, NOVELTY_NOT_CHECKED
@@ -72,6 +79,21 @@ NO_AUTH_MSG = (
     "  bedrock:   AWS_* creds + --provider bedrock (CLAUDE_CODE_USE_BEDROCK)\n"
     "  vertex:    project, region, and GOOGLE_APPLICATION_CREDENTIALS + --provider vertex"
 )
+DEFAULT_MAX_PARALLEL = 4
+
+
+async def _gather_bounded(coroutines, limit: int):
+    """Gather coroutines while bounding live agent/container workflows."""
+    semaphore = asyncio.Semaphore(limit)
+
+    async def _one(coroutine):
+        async with semaphore:
+            return await coroutine
+
+    return await asyncio.gather(
+        *[_one(coroutine) for coroutine in coroutines],
+        return_exceptions=True,
+    )
 
 
 def _resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
@@ -199,6 +221,14 @@ def _load_run_checkpoint(out_dir: Path) -> RunResult | None:
     agent_failed / build_failed / error are NOT terminal — resume retries them.
     Transcripts in result.json are slimmed to strings; reload as empty lists.
     """
+    result = _load_run_result(out_dir)
+    if result is None or result.status not in _RUN_TERMINAL:
+        return None
+    return result
+
+
+def _load_run_result(out_dir: Path) -> RunResult | None:
+    """Load any complete run result, including ``crash_ungraded``."""
     p = out_dir / "result.json"
     if not p.exists():
         return None
@@ -206,11 +236,12 @@ def _load_run_checkpoint(out_dir: Path) -> RunResult | None:
         d = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         return None
-    if d.get("status") not in _RUN_TERMINAL:
-        return None
     d["find_transcript"] = []
     d["grade_transcript"] = []
-    return RunResult.from_dict(d)
+    try:
+        return RunResult.from_dict(d)
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _resume_layout_error(results_root: Path, runs: int) -> str | None:
@@ -234,8 +265,7 @@ def _write_result(out_dir: Path, result: RunResult) -> None:
     # PoC bytes if we have them
     if result.crash:
         artifact_name = "replay.json" if is_web(result.crash.profile) else "poc.bin"
-        with open(out_dir / artifact_name, "wb") as f:
-            f.write(result.crash.poc_bytes)
+        atomic_write_bytes(out_dir / artifact_name, result.crash.poc_bytes)
 
     # result.json — strip transcripts to keep it readable (they're in the JSONLs)
     slim = result.to_dict()
@@ -249,8 +279,7 @@ def _write_result(out_dir: Path, result: RunResult) -> None:
             slim["crash"]["evidence_excerpt"] = _evidence_excerpt(result.crash)
         else:
             slim["crash"]["reason"] = crash_reason(result.crash.crash_output)
-    with open(out_dir / "result.json", "w") as f:
-        json.dump(slim, f, indent=2)
+    atomic_write_json(out_dir / "result.json", slim)
 
 
 async def _run_once(
@@ -358,7 +387,7 @@ async def _run_once(
 
     if find_only:
         return _done(RunResult(
-            target=target.name, status="no_crash_found",  # ungraded → not confirmed
+            target=target.name, status="crash_ungraded",
             crash=crash, verdict=None,
             find_transcript=find_transcript, timings=timings,
         ))
@@ -421,6 +450,72 @@ async def _run_once(
     return result
 
 
+async def _grade_existing(
+    run_idx: int,
+    target: TargetConfig,
+    model: str,
+    agent_env: dict[str, str],
+    out_dir: Path,
+    previous: RunResult,
+    stream_ctx: dict | None,
+    system_prompt: str | None,
+    container_scope: str,
+    accept_dos: bool = False,
+) -> RunResult:
+    """Resume a find-only checkpoint at grade without rerunning discovery."""
+    assert previous.crash is not None
+    crash = previous.crash
+    timings = dict(previous.timings)
+    print(f"[resume] run_{run_idx:03d}: grading saved ungraded crash")
+    try:
+        verdict, grade_result, elapsed = await run_grade(
+            crash,
+            target,
+            model=model,
+            workspace_dir=str(out_dir / "grade_workspace"),
+            agent_env=agent_env,
+            container_name=_container_name(
+                "grader", target.name, container_scope, run_idx
+            ),
+            transcript_path=str(out_dir / "grade_transcript.jsonl"),
+            progress_prefix=f"[grade:{run_idx}]",
+            system_prompt=system_prompt,
+            accept_dos=accept_dos,
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        result = RunResult(
+            target=target.name, status="agent_failed", crash=crash, verdict=None,
+            timings=timings, error=f"grade agent: {type(exc).__name__}: {exc}",
+        )
+        _write_result(out_dir, result)
+        return result
+    timings["grade"] = elapsed
+    if grade_result.error:
+        result = RunResult(
+            target=target.name, status="agent_failed", crash=crash, verdict=None,
+            grade_transcript=grade_result.transcript(), timings=timings,
+            error=f"grade agent: {grade_result.error}",
+        )
+    else:
+        status = "crash_found" if verdict.passed else "crash_rejected"
+        result = RunResult(
+            target=target.name, status=status, crash=crash, verdict=verdict,
+            grade_transcript=grade_result.transcript(), timings=timings,
+        )
+    _write_result(out_dir, result)
+    if stream_ctx is not None and result.verdict is not None:
+        try:
+            await _stream_dispatch(
+                run_idx, target, model, agent_env, crash,
+                result.status, result.verdict.score, stream_ctx,
+            )
+        except Exception:
+            traceback.print_exc()
+            print(f"[judge:{run_idx}] stream dispatch failed — result.json preserved")
+    return result
+
+
 async def _stream_dispatch(
     run_idx: int,
     target: TargetConfig,
@@ -471,24 +566,45 @@ async def _stream_dispatch(
             assert bug_id is not None  # _parse_judge enforces
         _log_judge(reports_root, run_idx, jv, bug_id=bug_id)
 
-    # Lock released — report agent runs without serializing the batch.
-    task = asyncio.create_task(_stream_report(
-        run_idx, bug_id, crash, target, model, agent_env,
-        reports_root, re_report=(jv.judgment == "DUP_BETTER"),
-        novelty=ctx["novelty"], max_turns=ctx["report_max_turns"],
-        system_prompt=ctx["system_prompt"],
-        container_scope=ctx["container_scope"],
-    ))
+    # Lock released. Reports for different bugs can run in parallel; reports
+    # for one bug must finish in judge order before replacing its canonical
+    # report or comparing a DUP_BETTER candidate.
+    _queue_stream_report(
+        run_idx, bug_id, crash, target, model, agent_env, ctx,
+        re_report=(jv.judgment == "DUP_BETTER"),
+    )
+
+
+def _queue_stream_report(
+    run_idx: int, bug_id: int, crash: CrashArtifact,
+    target: TargetConfig, model: str, agent_env: dict[str, str], ctx: dict,
+    *, re_report: bool,
+) -> None:
+    previous = ctx["report_tails"].get(bug_id)
+
+    async def _queued():
+        if previous is not None:
+            await asyncio.gather(previous, return_exceptions=True)
+        async with ctx["agent_semaphore"]:
+            return await _stream_report(
+                run_idx, bug_id, crash, target, model, agent_env,
+                ctx["reports_root"], re_report=re_report,
+                novelty=ctx["novelty"], max_turns=ctx["report_max_turns"],
+                system_prompt=ctx["system_prompt"],
+                container_scope=ctx["container_scope"],
+            )
+
+    task = asyncio.create_task(_queued())
+    ctx["report_tails"][bug_id] = task
     ctx["report_tasks"].append(task)
 
 
 def _log_judge(reports_root: Path, run_idx: int, jv, bug_id: int | None) -> None:
     reports_root.mkdir(parents=True, exist_ok=True)
-    with open(reports_root / "judge_log.jsonl", "a") as f:
-        f.write(json.dumps({
-            "run_idx": run_idx, "judgment": jv.judgment, "bug_id": bug_id,
-            "reasoning": jv.reasoning,
-        }) + "\n")
+    append_jsonl(reports_root / "judge_log.jsonl", {
+        "run_idx": run_idx, "judgment": jv.judgment, "bug_id": bug_id,
+        "reasoning": jv.reasoning,
+    })
 
 
 def _judged_runs(reports_root: Path) -> set[int]:
@@ -507,6 +623,84 @@ def _judged_runs(reports_root: Path) -> set[int]:
     return seen
 
 
+def _repair_judge_log_from_manifest(reports_root: Path) -> None:
+    """Recover NEW decisions persisted just before their judge-log write."""
+    manifest = reports_root / "manifest.jsonl"
+    if not manifest.exists():
+        return
+    judged = _judged_runs(reports_root)
+    for line in manifest.read_text().splitlines():
+        try:
+            entry = json.loads(line)
+            run_idx, bug_id = entry["run_idx"], entry["bug_id"]
+            if (not isinstance(run_idx, int) or not isinstance(bug_id, int)
+                    or run_idx in judged):
+                continue
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+        append_jsonl(reports_root / "judge_log.jsonl", {
+            "run_idx": run_idx, "judgment": "NEW", "bug_id": bug_id,
+            "reasoning": "recovered NEW decision from manifest",
+        })
+        judged.add(run_idx)
+
+
+def _pending_stream_reports(reports_root: Path) -> list[dict]:
+    """Recover judged report jobs that did not finish before interruption."""
+    log = reports_root / "judge_log.jsonl"
+    if not log.exists():
+        return []
+    jobs: list[tuple[dict, bool]] = []
+    seen: set[int] = set()
+    for line in log.read_text().splitlines():
+        try:
+            entry = json.loads(line)
+            run_idx, bug_id = entry["run_idx"], entry["bug_id"]
+            if (entry["judgment"] not in {"NEW", "DUP_BETTER"}
+                    or not isinstance(run_idx, int)
+                    or not isinstance(bug_id, int)
+                    or run_idx in seen):
+                continue
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+        seen.add(run_idx)
+        jobs.append((entry, _stream_report_complete(reports_root, run_idx, bug_id)))
+    # A later completed DUP_BETTER report supersedes an earlier failed job for
+    # the same bug. Replaying the old job would replace newer canonical work.
+    completed_later: set[int] = set()
+    pending: list[dict] = []
+    for entry, complete in reversed(jobs):
+        bug_id = entry["bug_id"]
+        if complete:
+            completed_later.add(bug_id)
+        elif bug_id not in completed_later:
+            pending.append(entry)
+    return list(reversed(pending))
+
+
+def _stream_report_complete(reports_root: Path, run_idx: int, bug_id: int) -> bool:
+    bug_dir = reports_root / f"bug_{bug_id:02d}"
+    attempt = bug_dir / f"report_run{run_idx:03d}.json"
+    if attempt.exists():
+        try:
+            report = json.loads(attempt.read_text())
+            return (report.get("status") == "report_submitted"
+                    and report.get("stream_complete") is True)
+        except (OSError, json.JSONDecodeError):
+            return False
+    # Results created before per-run completion records existed are complete
+    # when their submitted report is present in the canonical or versioned set.
+    for path in [bug_dir / "report.json", *bug_dir.glob("report_v*.json")]:
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (report.get("from_run") == run_idx
+                and report.get("status") == "report_submitted"):
+            return True
+    return False
+
+
 async def _stream_report(
     run_idx: int,
     bug_id: int,
@@ -521,80 +715,85 @@ async def _stream_report(
     system_prompt: str | None,
     container_scope: str,
 ) -> dict:
-    """Write an exploitability report for one crash. If re_report, preserve
-    the existing report as report_v1.json and run a compare agent after the
-    new one lands."""
+    """Generate one report candidate, then publish a canonical report."""
     out_dir = reports_root / f"bug_{bug_id:02d}"
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    old_report_text: str | None = None
-    if re_report and (out_dir / "report.json").exists():
-        # Preserve old one side-by-side; rotate if v1 already taken.
-        n = 1
-        while (out_dir / f"report_v{n}.json").exists():
-            n += 1
-        (out_dir / "report.json").rename(out_dir / f"report_v{n}.json")
+    attempt_path = out_dir / f"report_run{run_idx:03d}.json"
+    candidate: dict | None = None
+    if attempt_path.exists():
         try:
-            old_report_text = json.loads(
-                (out_dir / f"report_v{n}.json").read_text()
-            ).get("report", "")
+            saved = json.loads(attempt_path.read_text())
+            if saved.get("status") == "report_submitted" and saved.get("report"):
+                candidate = saved
         except (OSError, json.JSONDecodeError):
-            old_report_text = None
+            pass
+    if candidate is not None and candidate.get("stream_complete") is True:
+        return candidate
 
-    frame = top_frame(crash.crash_output) or ""
-    crash_file = crash_file_from_frame(frame)
-    log = None
-    # Web replay evidence has no trustworthy source-file attribution yet. Never
-    # turn an empty path into an arbitrary upstream-file novelty result.
-    if novelty and not is_web(target.profile):
-        print(f"[report:{run_idx}→bug_{bug_id:02d}] novelty: fetching upstream log for {crash_file or '?'} ...")
-        log = upstream_log(target.github_url, target.commit,
-                           crash_file or "", max_bytes=2000)
+    if candidate is None:
+        frame = top_frame(crash.crash_output) or ""
+        crash_file = crash_file_from_frame(frame)
+        log = None
+        # Web replay evidence has no trustworthy source-file attribution yet.
+        if novelty and not is_web(target.profile):
+            print(f"[report:{run_idx}→bug_{bug_id:02d}] novelty: fetching upstream log for {crash_file or '?'} ...")
+            log = upstream_log(target.github_url, target.commit,
+                               crash_file or "", max_bytes=2000)
 
-    print(color(f"[report:{run_idx}→bug_{bug_id:02d}] starting ({len(crash.poc_bytes)}B PoC) ...", "report"))
-    try:
-        verdict, report_text, result, elapsed = await run_report(
-            crash, target, model=model,
-            workspace_dir=str(out_dir / "workspace"),
-            upstream_log=log, crash_file=crash_file,
-            agent_env=agent_env,
-            container_name=_container_name(
-                "report", target.name, container_scope, run_idx
-            ),
-            max_turns=max_turns,
-            transcript_path=str(out_dir / f"report_transcript_run{run_idx:03d}.jsonl"),
-            progress_prefix=f"[report:{run_idx}→bug_{bug_id:02d}]",
-            system_prompt=system_prompt,
-        )
-    except Exception as e:
-        traceback.print_exc()
-        out = {"bug_id": bug_id, "from_run": run_idx, "status": "agent_failed",
-               "error": f"{type(e).__name__}: {e}"}
-        _write_report_json(out_dir, out)
-        return out
+        print(color(f"[report:{run_idx}→bug_{bug_id:02d}] starting ({len(crash.poc_bytes)}B PoC) ...", "report"))
+        try:
+            verdict, report_text, result, elapsed = await run_report(
+                crash, target, model=model,
+                workspace_dir=str(out_dir / "workspace"),
+                upstream_log=log, crash_file=crash_file,
+                agent_env=agent_env,
+                container_name=_container_name(
+                    "report", target.name, container_scope, run_idx
+                ),
+                max_turns=max_turns,
+                transcript_path=str(out_dir / f"report_transcript_run{run_idx:03d}.jsonl"),
+                progress_prefix=f"[report:{run_idx}→bug_{bug_id:02d}]",
+                system_prompt=system_prompt,
+            )
+        except Exception as e:
+            traceback.print_exc()
+            failure = {"bug_id": bug_id, "from_run": run_idx,
+                       "status": "agent_failed",
+                       "error": f"{type(e).__name__}: {e}"}
+            atomic_write_json(attempt_path, failure)
+            return failure
 
-    status = "no_report" if verdict is None else "report_submitted"
-    if result.error:
-        status = "agent_failed"
-    _rline = (f"[report:{run_idx}→bug_{bug_id:02d}] done in {elapsed:.1f}s: {status}"
-              + (f" rubric={verdict.rubric_score}/10 sev={verdict.severity_rating}"
-                 if verdict else ""))
-    print(color(_rline, "bold") if status == "report_submitted" else _rline)
+        status = "report_submitted" if verdict and report_text else "no_report"
+        if result.error:
+            status = "agent_failed"
+        _rline = (f"[report:{run_idx}→bug_{bug_id:02d}] done in {elapsed:.1f}s: {status}"
+                  + (f" rubric={verdict.rubric_score}/10 sev={verdict.severity_rating}"
+                     if verdict else ""))
+        print(color(_rline, "bold") if status == "report_submitted" else _rline)
 
-    out = {
-        "signature": {"crash_type": crash.crash_type, "top_frame": frame},
-        "bug_id": bug_id, "from_run": run_idx, "status": status,
-        "error": result.error, "elapsed": elapsed,
-        "upstream_log": log if log else NOVELTY_NOT_CHECKED,
-        "verdict": verdict.to_dict() if verdict else None,
-        "report": report_text,
-    }
-    _write_report_json(out_dir, out)
+        candidate = {
+            "signature": {"crash_type": crash.crash_type, "top_frame": frame},
+            "bug_id": bug_id, "from_run": run_idx, "status": status,
+            "error": result.error, "elapsed": elapsed,
+            "upstream_log": log if log else NOVELTY_NOT_CHECKED,
+            "verdict": verdict.to_dict() if verdict else None,
+            "report": report_text,
+        }
+        atomic_write_json(attempt_path, candidate)
 
-    # Compare old vs new and record canonical winner.
-    if re_report and old_report_text and report_text:
-        winner, reasoning, _cr, c_elapsed = await run_compare(
-            report_a=old_report_text, report_b=report_text,
+    if candidate["status"] != "report_submitted":
+        return candidate
+
+    # Keep the existing canonical report intact until the candidate and any
+    # comparison succeed. A failed replacement remains retryable on --resume.
+    prior = _read_submitted_report(out_dir / "report.json")
+    if prior and prior.get("from_run") == run_idx:
+        prior = _latest_prior_report(out_dir, run_idx)
+    winner = "B"
+    reasoning = "first report for this bug"
+    if re_report and prior and prior.get("report"):
+        winner, reasoning, compare_result, elapsed = await run_compare(
+            report_a=prior["report"], report_b=candidate["report"],
             model=model, image_tag=target.image_tag, agent_env=agent_env,
             container_name=_container_name(
                 "compare", target.name, container_scope, run_idx
@@ -603,12 +802,56 @@ async def _stream_report(
             progress_prefix=f"[compare:{run_idx}→bug_{bug_id:02d}]",
             system_prompt=system_prompt,
         )
-        print(f"[compare:{run_idx}→bug_{bug_id:02d}] canonical={winner} in {c_elapsed:.1f}s")
-        with open(out_dir / "canonical.json", "w") as f:
-            json.dump({"winner": winner, "reasoning": reasoning,
-                       "a": "prior report", "b": f"run_{run_idx:03d}"}, f, indent=2)
+        if compare_result.error:
+            raise RuntimeError(f"compare agent failed: {compare_result.error}")
+        print(f"[compare:{run_idx}→bug_{bug_id:02d}] canonical={winner} in {elapsed:.1f}s")
 
-    return out
+    if winner == "B":
+        current = _read_submitted_report(out_dir / "report.json")
+        if current and current.get("from_run") != run_idx:
+            _archive_report(out_dir, current)
+        _write_report_json(out_dir, candidate)
+    if re_report and prior:
+        atomic_write_json(out_dir / "canonical.json", {
+            "winner": winner, "reasoning": reasoning,
+            "a": f"run_{prior.get('from_run', 'unknown')}",
+            "b": f"run_{run_idx:03d}",
+        })
+    candidate["stream_complete"] = True
+    atomic_write_json(attempt_path, candidate)
+    return candidate
+
+
+def _read_submitted_report(path: Path) -> dict | None:
+    try:
+        report = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return report if report.get("status") == "report_submitted" else None
+
+
+def _latest_prior_report(out_dir: Path, run_idx: int) -> dict | None:
+    versions = sorted(
+        out_dir.glob("report_v*.json"),
+        key=lambda path: int(path.stem.removeprefix("report_v"))
+        if path.stem.removeprefix("report_v").isdigit() else -1,
+        reverse=True,
+    )
+    for path in versions:
+        report = _read_submitted_report(path)
+        if report and report.get("from_run") != run_idx:
+            return report
+    return None
+
+
+def _archive_report(out_dir: Path, report: dict) -> None:
+    for path in out_dir.glob("report_v*.json"):
+        if _read_submitted_report(path) == report:
+            return
+    n = 1
+    while (out_dir / f"report_v{n}.json").exists():
+        n += 1
+    atomic_write_json(out_dir / f"report_v{n}.json", report)
 
 
 def _assigned_focus(i: int, focus_areas: list[str]) -> str | None:
@@ -637,9 +880,13 @@ def _seed_found_bugs(path: Path, known_bugs: list[str]) -> None:
     """Seed the jsonl with config known_bugs so a mid-run `cat` is a
     complete view, not just peer discoveries. System-prompt attention fades
     at high turn counts; the cat check doesn't."""
-    with open(path, "w") as f:
-        for kb in known_bugs:
-            f.write(json.dumps({"source": "config", "summary": kb}) + "\n")
+    atomic_write_text(
+        path,
+        "".join(
+            json.dumps({"source": "config", "summary": kb}) + "\n"
+            for kb in known_bugs
+        ),
+    )
 
 
 def _append_found(path: Path, crash: CrashArtifact, run_idx: int) -> None:
@@ -649,8 +896,7 @@ def _append_found(path: Path, crash: CrashArtifact, run_idx: int) -> None:
     # variance, free-text agent tags all fragmented the dedup).
     entry = {"run_idx": run_idx}
     entry["evidence_excerpt" if is_web(crash.profile) else "asan_excerpt"] = _evidence_excerpt(crash)
-    with open(path, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    append_jsonl(path, entry)
 
 
 def _read_found_summaries(path: Path) -> list[str]:
@@ -707,11 +953,10 @@ def _next_bug_id(entries: list[dict]) -> int:
 def _append_manifest(reports_root: Path, bug_id: int, run_idx: int,
                      excerpt: str, profile: str = "cpp_asan") -> None:
     reports_root.mkdir(parents=True, exist_ok=True)
-    with open(reports_root / "manifest.jsonl", "a") as f:
-        f.write(json.dumps({
-            "bug_id": bug_id, "run_idx": run_idx, "profile": profile,
-            ("evidence_excerpt" if is_web(profile) else "asan_excerpt"): excerpt,
-        }) + "\n")
+    append_jsonl(reports_root / "manifest.jsonl", {
+        "bug_id": bug_id, "run_idx": run_idx, "profile": profile,
+        ("evidence_excerpt" if is_web(profile) else "asan_excerpt"): excerpt,
+    })
 
 
 async def _run_all(
@@ -788,7 +1033,7 @@ async def _run_all(
             print("[recon] No focus areas discovered; using config.yaml list")
         print()
     if not focus_ckpt.exists():
-        focus_ckpt.write_text(json.dumps(focus_areas, indent=2))
+        atomic_write_json(focus_ckpt, focus_areas)
 
     # ── Dispatch ─────────────────────────────────────────────────────────────────────────────
     out_dirs = [results_root if args.runs == 1 else results_root / f"run_{i:03d}"
@@ -796,13 +1041,23 @@ async def _run_all(
     # Checkpoint: skip runs whose result.json already landed with a terminal
     # status. agent_failed/error are retried.
     checkpoints: dict[int, RunResult] = {}
+    ungraded: dict[int, RunResult] = {}
     if args.resume:
         for i, d in enumerate(out_dirs):
-            if (r := _load_run_checkpoint(d)) is not None:
+            r = _load_run_result(d)
+            if r is None:
+                continue
+            if r.status in _RUN_TERMINAL or (
+                args.find_only and r.status == "crash_ungraded"
+            ):
                 checkpoints[i] = r
+            elif r.status == "crash_ungraded" and r.crash is not None:
+                ungraded[i] = r
         if checkpoints:
             print(f"[resume] {len(checkpoints)}/{args.runs} run(s) already terminal "
                   f"({', '.join(f'run_{i:03d}' for i in sorted(checkpoints))}); skipping")
+        if ungraded:
+            print(f"[resume] {len(ungraded)} saved crash(es) will continue at grade")
     # Shared file for runtime bug-sharing. Only wire it up for multi-run — a
     # solo agent has no siblings and the concurrent-agents prompt section would
     # just be noise. Absolute path: the agent's cwd is /tmp (find.py), not here.
@@ -818,15 +1073,33 @@ async def _run_all(
     if args.stream:
         stream_ctx = {
             "lock": asyncio.Lock(),
+            "agent_semaphore": asyncio.Semaphore(args.max_parallel),
             "reports_root": results_root / "reports",
             "report_tasks": [],
+            "report_tails": {},
             "novelty": args.novelty,
             "report_max_turns": args.report_max_turns,
             "system_prompt": system_prompt,
             "container_scope": container_scope,
         }
         if args.resume:
+            _repair_judge_log_from_manifest(stream_ctx["reports_root"])
             judged = _judged_runs(stream_ctx["reports_root"])
+            for entry in _pending_stream_reports(stream_ctx["reports_root"]):
+                run_idx = entry["run_idx"]
+                if run_idx >= len(out_dirs):
+                    print(f"[resume] report run_{run_idx:03d} is outside --runs={args.runs}")
+                    continue
+                saved = _load_run_result(out_dirs[run_idx])
+                if saved is None or saved.crash is None:
+                    print(f"[resume] report run_{run_idx:03d} has no saved crash")
+                    continue
+                print(f"[resume] retrying report for run_{run_idx:03d}")
+                _queue_stream_report(
+                    run_idx, entry["bug_id"], saved.crash, target,
+                    args.model, agent_env, stream_ctx,
+                    re_report=(entry["judgment"] == "DUP_BETTER"),
+                )
 
     async def _checkpointed(i: int) -> RunResult:
         r = checkpoints[i]
@@ -846,6 +1119,11 @@ async def _run_all(
     def _task(i: int):
         if i in checkpoints:
             return _checkpointed(i)
+        if i in ungraded:
+            return _grade_existing(
+                i, target, args.model, agent_env, out_dirs[i], ungraded[i],
+                stream_ctx, system_prompt, container_scope, args.accept_dos,
+            )
         return _run_once(i, target, args.model, args.find_only, args.max_turns, agent_env,
                          out_dirs[i], _assigned_focus(i, focus_areas), found_bugs_path,
                          stream_ctx, accept_dos=args.accept_dos, system_prompt=system_prompt,
@@ -853,9 +1131,18 @@ async def _run_all(
 
     if args.parallel:
         n_live = args.runs - len(checkpoints)
-        print(f"[dispatch] Launching {n_live} run(s) in parallel"
+        print(f"[dispatch] Launching {n_live} run(s), at most {args.max_parallel} concurrently"
               f"{' (streaming judge→report)' if args.stream else ''} ...\n")
-        raw = await asyncio.gather(*[_task(i) for i in range(args.runs)],
+        semaphore = (
+            stream_ctx["agent_semaphore"] if stream_ctx is not None
+            else asyncio.Semaphore(args.max_parallel)
+        )
+
+        async def _bounded_task(i: int):
+            async with semaphore:
+                return await _task(i)
+
+        raw = await asyncio.gather(*[_bounded_task(i) for i in range(args.runs)],
                                    return_exceptions=True)
         results: list[RunResult] = []
         for r in raw:
@@ -997,7 +1284,15 @@ def main() -> int:
     p_run.add_argument("--find-only", action="store_true", help="Skip grade stage")
     p_run.add_argument("--runs", type=int, default=1, help="Number of independent runs")
     p_run.add_argument("--parallel", action="store_true",
-                       help="Run all --runs concurrently (~1GB RAM per run)")
+                       help="Run multiple --runs concurrently")
+    p_run.add_argument(
+        "--max-parallel",
+        type=int,
+        default=int(os.environ.get(
+            "VULN_PIPELINE_MAX_PARALLEL", str(DEFAULT_MAX_PARALLEL)
+        )),
+        help="Maximum concurrent agent containers with --parallel (default 4)",
+    )
     p_run.add_argument("--auto-focus", dest="auto_focus", action="store_true",
                        help="Run recon agent to auto-discover focus areas (overrides config.yaml)")
     p_run.add_argument("--max-turns", type=int, default=DEFAULT_FIND_MAX_TURNS,
@@ -1013,7 +1308,8 @@ def main() -> int:
     p_run.add_argument("--resume", type=Path, default=None, metavar="DIR",
                        help="Resume a partially-completed batch dir (results/<target>/<ts>/). "
                             "Runs whose result.json reached a terminal status are skipped; "
-                            "agent_failed/error runs are retried. found_bugs.jsonl and "
+                            "crash_ungraded runs continue at grade; agent_failed/error runs "
+                            "are retried. found_bugs.jsonl and "
                             "focus_areas.json are reused, not re-seeded.")
     p_run.add_argument("--stream", action="store_true",
                        help="Stream judge→report as each grade lands. First report shows up "
@@ -1067,6 +1363,10 @@ def main() -> int:
                        help="Model provider: anthropic (default), bedrock, vertex")
     p_report.add_argument("--parallel", action="store_true",
                           help="Run report agents concurrently")
+    p_report.add_argument(
+        "--max-parallel", type=int, default=DEFAULT_MAX_PARALLEL,
+        help=f"Maximum concurrent report workflows (default {DEFAULT_MAX_PARALLEL})",
+    )
     p_report.add_argument("--max-turns", type=int, default=REPORT_MAX_TURNS,
                           help=f"Report-agent turn budget (default {REPORT_MAX_TURNS})")
     p_report.add_argument("--only-passed", action="store_true",
@@ -1097,6 +1397,10 @@ def main() -> int:
                        help="Model provider: anthropic (default), bedrock, vertex")
     p_patch.add_argument("--parallel", action="store_true",
                          help="Run patch agents concurrently")
+    p_patch.add_argument(
+        "--max-parallel", type=int, default=DEFAULT_MAX_PARALLEL,
+        help=f"Maximum concurrent patch workflows (default {DEFAULT_MAX_PARALLEL})",
+    )
     p_patch.add_argument("--max-turns", type=int, default=PATCH_MAX_TURNS,
                          help=f"Patch-agent turn budget per iteration (default {PATCH_MAX_TURNS})")
     p_patch.add_argument("--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS,
@@ -1140,13 +1444,19 @@ def main() -> int:
         out = args.out or (args.results_dir / "oscal.json")
         doc = compliance.build_oscal(args.results_dir)
         n = len(doc["assessment-results"]["results"][0]["findings"])
-        out.write_text(json.dumps(doc, indent=2))
+        atomic_write_json(out, doc)
         print(f"  {n} finding(s) → {out}")
         return 0
     return 1
 
 
 def _cmd_run(args) -> int:
+    if args.runs < 1:
+        print("error: --runs must be at least 1", file=sys.stderr)
+        return 1
+    if args.max_parallel < 1:
+        print("error: --max-parallel must be at least 1", file=sys.stderr)
+        return 1
     # Resolve target
     try:
         target_dir = _resolve_target_dir(args.target)
@@ -1173,6 +1483,8 @@ def _cmd_run(args) -> int:
     print(f"  source_root: {target.source_root}")
     print(f"  max_turns:   {args.max_turns}")
     print(f"  runs:        {args.runs}{' (parallel)' if args.parallel else ''}")
+    if args.parallel:
+        print(f"  max_parallel:{args.max_parallel}")
     print(f"  find_only:   {args.find_only}")
     if target.focus_areas and not args.auto_focus:
         print(f"  focus_areas: {len(target.focus_areas)} configured")
@@ -1190,12 +1502,22 @@ def _cmd_run(args) -> int:
             return 1
         print(f"  resume:      {results_root}")
     else:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         results_root = Path(args.results_dir) / target.name / timestamp
+        try:
+            results_root.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            print(f"error: results directory collision: {results_root}", file=sys.stderr)
+            return 1
 
     _set_container_cleanup_scope(target.name, _container_scope(results_root))
 
-    pairs = asyncio.run(_run_all(target, args, agent_env, results_root))
+    try:
+        with exclusive_lock(results_root / ".orchestrator.lock"):
+            pairs = asyncio.run(_run_all(target, args, agent_env, results_root))
+    except ResultsLockError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     print("\n── Summary ────────────────────────────────────────────────────────────────────")
     exit_code = 0
@@ -1383,8 +1705,7 @@ async def _report_one(
 def _write_report_json(out_dir: Path, d: dict) -> None:
     if d.get("signature"):
         compliance.enrich(d)
-    with open(out_dir / "report.json", "w") as f:
-        json.dump(d, f, indent=2)
+    atomic_write_json(out_dir / "report.json", d)
 
 
 def _load_report_checkpoint(out_dir: Path, sig: tuple[str, str]) -> dict | None:
@@ -1411,6 +1732,9 @@ def _cmd_report(args) -> int:
     root: Path = args.results_dir
     if not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
+        return 1
+    if args.max_parallel < 1:
+        print("error: --max-parallel must be at least 1", file=sys.stderr)
         return 1
 
     agent_env = _resolve_auth_env(getattr(args, "provider", None))
@@ -1480,13 +1804,18 @@ def _cmd_report(args) -> int:
                  )
                  for i, (sig, ents) in enumerate(items)]
         if args.parallel:
-            return await asyncio.gather(*tasks, return_exceptions=True)
+            return await _gather_bounded(tasks, args.max_parallel)
         out = []
         for t in tasks:
             out.append(await t)
         return out
 
-    results = asyncio.run(_dispatch())
+    try:
+        with exclusive_lock(root / ".orchestrator.lock"):
+            results = asyncio.run(_dispatch())
+    except ResultsLockError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     print("\n── Summary ────────────────────────────────────────────────────────────────────")
     exit_code = 0
@@ -1511,6 +1840,9 @@ def _cmd_patch(args) -> int:
     root: Path = args.results_dir
     if not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
+        return 1
+    if args.max_parallel < 1:
+        print("error: --max-parallel must be at least 1", file=sys.stderr)
         return 1
     agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
@@ -1596,10 +1928,15 @@ def _cmd_patch(args) -> int:
     async def _dispatch():
         coros = [_one(i, ents) for i, _sig, ents in items]
         if args.parallel:
-            return await asyncio.gather(*coros, return_exceptions=True)
+            return await _gather_bounded(coros, args.max_parallel)
         return [await c for c in coros]
 
-    results = asyncio.run(_dispatch())
+    try:
+        with exclusive_lock(root / ".orchestrator.lock"):
+            results = asyncio.run(_dispatch())
+    except ResultsLockError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     print("\n── Summary ────────────────────────────────────────────────────────────────────")
     exit_code = 0

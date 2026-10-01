@@ -7,7 +7,7 @@ import pytest
 
 from harness.cli import (
     _load_run_checkpoint, _load_report_checkpoint, _resume_layout_error,
-    _judged_runs, _RUN_TERMINAL,
+    _judged_runs, _load_run_result, _RUN_TERMINAL,
 )
 
 
@@ -36,6 +36,27 @@ def test_run_checkpoint_retries_agent_failed(tmp_path):
            {"target": "t", "status": "agent_failed", "crash": None, "verdict": None,
             "error": "boom"})
     assert _load_run_checkpoint(tmp_path) is None
+
+
+def test_ungraded_crash_is_loadable_but_not_terminal(tmp_path):
+    _write(tmp_path / "result.json", {
+        "target": "t",
+        "status": "crash_ungraded",
+        "crash": {
+            "poc_path": "/tmp/poc.bin",
+            "poc_bytes": "eA==",
+            "reproduction_command": "/work/entry /tmp/poc.bin",
+            "crash_type": "heap-buffer-overflow",
+            "crash_output": "ASAN",
+            "exit_code": 134,
+        },
+        "verdict": None,
+    })
+    assert _load_run_checkpoint(tmp_path) is None
+    loaded = _load_run_result(tmp_path)
+    assert loaded is not None
+    assert loaded.status == "crash_ungraded"
+    assert loaded.crash is not None and loaded.crash.poc_bytes == b"x"
 
 
 def test_run_checkpoint_ignores_slimmed_transcripts(tmp_path):
