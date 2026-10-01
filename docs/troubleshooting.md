@@ -15,8 +15,11 @@ duplicates and re-rank by derived exploitability.
 ## Rate limits
 
 As a rough guideline, expect ~10K uncached input tokens/min and ~2K output
-tokens/min per agent. You can scale parallelism up to your account's ITPM
-limit (roughly **10 agents per 100K ITPM**). You can check your limit in
+tokens/min per agent. `--parallel` is bounded to four live agent containers by
+default; use `--max-parallel N` (or `VULN_PIPELINE_MAX_PARALLEL`) to select a
+lower or explicitly higher ceiling within your host and account capacity.
+Roughly **10 agents per 100K ITPM** is the upper rate-limit guideline. Check
+your limit in
 the [Claude Console](https://console.claude.com/settings/limits).
 
 Bursting past your limit is not catastrophic. The pipeline resumes on 429
@@ -58,9 +61,13 @@ bin/vp-sandboxed report results/<target>/<ts>/ --fresh  # force full re-report
 ```
 
 `--resume` skips any run whose `result.json` reached a terminal status
-(`crash_found` / `crash_rejected` / `no_crash_found`) and retries the ones
-that failed (`agent_failed`/ `build_failed`/`error`). `found_bugs.jsonl` and 
+(`crash_found` / `crash_rejected` / `no_crash_found`), continues
+`crash_ungraded` find-only results directly at grade, and retries the ones
+that failed (`agent_failed`/ `build_failed`/`error`). `found_bugs.jsonl` and
 `focus_areas.json` carry over, so resumed runs see the same dedup context.
+New batches also record the immutable target image ID in
+`batch_metadata.json`; resume refuses to continue if rebuilding the target
+produces different bits.
 
 This pipeline-level resume, which survives a killed orchestrator, is different
 from the per-agent session resume described in 

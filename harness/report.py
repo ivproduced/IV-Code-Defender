@@ -19,6 +19,7 @@ from . import docker_ops, sandbox
 from .agent import run_agent, parse_xml_tag, AgentResult
 from .artifacts import CrashArtifact, ReportVerdict
 from .config import TargetConfig
+from .io_utils import atomic_write_bytes
 from .profiles import (
     build_report_grader_prompt,
     build_report_prompt,
@@ -68,8 +69,9 @@ async def run_report(
         adapted_cmd = trusted_reproduction_command(target, crash, workspace_artifact)
 
         os.makedirs(workspace_dir, exist_ok=True)
-        with open(os.path.join(workspace_dir, artifact_name), "wb") as f:
-            f.write(crash.poc_bytes)
+        atomic_write_bytes(
+            os.path.join(workspace_dir, artifact_name), crash.poc_bytes
+        )
 
         prompt = build_report_prompt(
             target=target, crash=crash, adapted_command=adapted_cmd,

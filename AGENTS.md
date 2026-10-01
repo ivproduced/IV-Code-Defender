@@ -23,8 +23,10 @@ fast smoke test). The rest of this file is the pipeline operator guide.
 # vuln-pipeline
 
 Execution-verified vulnerability discovery for C/C++ targets. A find-agent reads
-source, crafts inputs, runs an ASAN-instrumented binary until it lands a 3/3
-reproducing crash. A grade-agent in a fresh container verifies it. Output is a
+source, crafts inputs, and runs an ASAN-instrumented binary until it lands a
+reproducing crash. A pipeline-owned oracle replays it three times in a fresh,
+credential-free container; a no-tools grade-agent handles semantic checks.
+Output is a
 crashing input file, not prose.
 
 ## When the user asks you to run it
@@ -55,7 +57,8 @@ Each pipeline phase is a standalone subcommand:
 ```bash
 vuln-pipeline recon <target> --model <model>        # propose focus_areas (YAML → stdout)
 vuln-pipeline run <target> --model <model>          # find + grade, one run
-vuln-pipeline run <target> --runs N --parallel      # N concurrent finds, round-robin over focus_areas
+vuln-pipeline run <target> --runs N --parallel      # bounded concurrent finds, round-robin over focus_areas
+vuln-pipeline run <target> --runs N --parallel --max-parallel 4
 vuln-pipeline run <target> --auto-focus             # recon first, use its partition
 vuln-pipeline run <target> --stream                 # judge + report stream in as grades land (recommended)
 vuln-pipeline run <target> --find-only              # skip grade (prompt iteration)
