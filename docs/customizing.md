@@ -73,6 +73,8 @@ understand your stack, both take a plain-text instructions file:
 
 `--extra` appends org-specific vulnerability categories to the scan brief
 (e.g., GraphQL depth attacks, PCI retention, your custom auth layer).
+The built-in scan brief already covers the 2026 OWASP LLM and Agentic Top 10
+when LLM or agent code is present; see [OWASP AI coverage](owasp-ai-coverage.md).
 
 `--fp-rules` appends org-specific exclusions to the triage verifier (e.g., "we use Prisma
 everywhere, raw-query SQLi only", "k8s resource limits cover DoS").

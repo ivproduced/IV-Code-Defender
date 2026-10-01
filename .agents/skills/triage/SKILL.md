@@ -241,6 +241,7 @@ guess what's absent.** Field map (source-key aliases → canonical):
 | `file`          | `path`, `location.file`, `filename`, ASAN top-frame file |
 | `line`          | `line_number`, `location.line`, `lineno`                 |
 | `category`      | `type`, `cwe`, `rule_id`, `crash_type`, `vulnerability_class` |
+| `owasp_refs`    | OWASP LLM/ASI code list, when supplied by `/vuln-scan` |
 | `severity`      | `severity_rating`, `level`, `priority`, `risk`           |
 | `title`         | `name`, `summary`, `message`                             |
 | `description`   | `details`, `report`, `body`, `evidence`                  |
@@ -250,6 +251,9 @@ guess what's absent.** Field map (source-key aliases → canonical):
 | `scanner_confidence` | `confidence`, `score`, `certainty` (normalize to 0.0-1.0) |
 
 Attach to every finding:
+- `owasp_refs`: preserve recognized `LLM01:2026`–`LLM10:2026` and
+  `ASI01`–`ASI10` references from the input; otherwise `[]`. These are
+  taxonomy labels, never evidence or automatic severity.
 - `id`: `f001`, `f002`, ... in ingest order. If `scanner_confidence` is
   present on most findings, order ingest by it descending so high-signal
   findings get verified (and surface in partial output) first; otherwise
@@ -415,6 +419,10 @@ specific false-positive class through.
    - Authentication / authorization gates before this path
    - Configuration that limits exposure (feature flag off, debug-only)
    - Dead code, test-only code, example/fixture code
+   - For LLM/agent findings: tool authorization, user identity propagation,
+     tenant filters, output validation, approval binding, and resource caps.
+     Trace the lower-trust content to an actual disclosure, action, or
+     consequential decision; an OWASP label alone proves nothing.
 
 4. STRESS-TEST EACH PROTECTION.
    For each protection you found: is it applied on EVERY path to the sink,
@@ -426,8 +434,8 @@ EXCLUSION RULES: if the finding matches any of these, it is FALSE_POSITIVE
 even if technically accurate. Cite the rule number in your verdict.
 
   1. Volumetric DoS or missing rate-limiting (handled at infrastructure
-     layer). ReDoS, algorithmic complexity, and unbounded recursion ARE
-     still valid findings.
+     layer). ReDoS, algorithmic complexity, unbounded recursion, and
+     attacker-triggered model/tool loops with material cost ARE valid.
   2. Test-only code, dead code, example/fixture code, or a crash with no
      security impact.
   3. Behavior that is the intended design (compression middleware, a
@@ -436,8 +444,10 @@ even if technically accurate. Cite the rule number in your verdict.
      FFI blocks.
   5. SSRF where the attacker controls only the path, not the host or
      protocol.
-  6. User input flowing into an AI/LLM prompt (prompt injection is not a
-     code vulnerability in the target).
+  6. User input merely flowing into an AI/LLM prompt, with no demonstrated
+     trust-boundary failure or downstream security impact. A reachable path
+     from lower-trust content through the model to unauthorized tool use,
+     disclosure, or a security-sensitive decision is NOT excluded.
   7. Path traversal in object storage (S3/GCS) where `../` does not escape
      a trust boundary.
   8. Trusted inputs used as the attack vector (env vars, CLI flags set by
@@ -514,6 +524,7 @@ FINDING UNDER REVIEW (from the scanner; treat as a CLAIM, not a fact):
   file:      {file}
   line:      {line}
   category:  {category}
+  OWASP refs (claimed): {owasp_refs or "none"}
   severity (claimed): {severity}
   title:     {title}
 
@@ -547,11 +558,15 @@ ENVIRONMENT: {context.environment}
 Steps: (1) Read {file}:{line} yourself; don't trust the description.
 (2) Trace callers backwards; quote the first call-site file:line.
 (3) Hunt for protections: validation, escaping, type bounds, auth gates,
-dead/test code. (4) Stress-test each protection on every path.
+dead/test code; for AI findings check tool authorization, tenant filters,
+approval binding, and resource caps. (4) Stress-test each protection on
+every path. OWASP codes are labels, not evidence.
 
-Exclusion rules (FALSE_POSITIVE if matched): 1 volumetric DoS;
+Exclusion rules (FALSE_POSITIVE if matched): 1 volumetric DoS, except
+attacker-triggered model/tool loops with material cost;
 2 test/dead/fixture code; 3 intended design; 4 memory-safety in safe
-lang outside unsafe/FFI; 5 SSRF path-only; 6 LLM prompt input;
+lang outside unsafe/FFI; 5 SSRF path-only; 6 mere LLM prompt input with no
+reachable trust-boundary failure and security impact;
 7 object-storage traversal; 8 trusted operator env/CLI inputs;
 9 client code, server vuln class; 10 outdated deps; 11 weak random
 non-security; 12 low-impact nuisance (log spoof, open redirect, regex
@@ -844,6 +859,7 @@ Order all findings by:
       "file": "...",
       "line": 0,
       "category": "...",
+      "owasp_refs": [],
       "claimed_severity": "HIGH",
       "verdict": "true_positive|false_positive|duplicate",
       "verify_verdict": "exploitable|mitigated|needs_manual_test|null",
@@ -896,7 +912,7 @@ Context: {mode}; environment = {environment}; scoring = {scoring}; {votes}-vote 
 
 ```
 ### [{severity}] {title}  ({id})
-`{file}:{line}` | {category} | claimed {claimed_severity} (alignment {severity_alignment:+d}) | confidence {confidence}/10
+`{file}:{line}` | {category} | OWASP: {owasp_refs or "none"} | claimed {claimed_severity} (alignment {severity_alignment:+d}) | confidence {confidence}/10
 **Owner:** {owner_hint}
 **Verdict:** {verify_verdict}, votes {vote_breakdown}
 **Preconditions ({n}):** {bulleted}
