@@ -102,8 +102,13 @@ override. Re-run the setup script after changing provider, region, or override.
   lateral-movement risk) **or** `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
   [/ `AWS_SESSION_TOKEN`]
 
-If using access keys, scope the IAM principal to `bedrock:InvokeModel*` only —
-the credentials are visible to the agent process inside the sandbox.
+If using access keys, scope the IAM principal to `bedrock:InvokeModel*` only.
+Find-agent credentials are visible inside the same sandbox that executes the
+target, so hostile target code must be assumed capable of reading them. The
+network allowlist prevents general exfiltration but does not prevent abuse
+against the approved model endpoint. Use a dedicated invocation-only principal
+with a short lifetime and a hard spend/quota limit. The machine replay grader
+runs separately with no credentials and no network.
 `AWS_PROFILE` and `~/.aws` are **not** forwarded (the sandbox never mounts
 credential files), so credentials must be in the environment. For multi-hour
 batch runs, use long-lived keys or session tokens with ≥12h TTL.
@@ -145,6 +150,10 @@ path in your deployment before starting a long batch.
 
 `VP_EGRESS_ALLOW` accepts wildcard entries (`*.domain.tld:port`) for explicit
 overrides only; auto-derived defaults never use wildcards.
+
+The optional host-side novelty check accepts credential-free HTTPS clone URLs
+on `github.com` only. Self-hosted Git services must be explicitly listed in
+`VULN_PIPELINE_NOVELTY_HOSTS` as a comma-separated hostname allowlist.
 
 The script downloads a pinned `runsc` release. Set `RUNSC_RELEASE=<yyyymmdd>`
 to use a different one.
@@ -197,8 +206,8 @@ still run inside Docker containers, but:
 - Containers run on your host's kernel, so any unexpected agent actions or
 malicious target code have a much shorter path to the host.
 - Containers get normal Docker networking with full internet access.
-- The agent's credentials are in the same container as the target it's compiling
-and crashing.
+- The existing same-container credential exposure is combined with unrestricted
+  networking, so target code can exfiltrate or use those credentials broadly.
 
 Use of this flag is not recommended and should be done with caution, for
 development, on a throwaway VM.

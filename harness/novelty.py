@@ -11,9 +11,12 @@ When disabled (default), the prompt receives NOVELTY_NOT_CHECKED.
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 CACHE_ROOT = Path.home() / ".cache" / "vuln-pipeline" / "novelty"
 NOVELTY_NOT_CHECKED = "(host-side upstream check not performed — run with --novelty to enable)"
@@ -26,8 +29,19 @@ def upstream_log(github_url: str, commit: str, crash_file: str, max_bytes: int =
     one-line failure reason. Never raises — a network/git failure becomes
     prompt text, not a crashed pipeline.
     """
-    # Canonicalize a cache dir from the URL (strip .git, replace /:).
-    slug = re.sub(r"\W+", "_", github_url.rstrip("/").removesuffix(".git")).strip("_")
+    try:
+        github_url = _validated_upstream_url(github_url)
+    except ValueError as exc:
+        return f"[upstream URL rejected: {exc}]"
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
+        return "[upstream commit rejected: expected a 7-64 character hex object ID]"
+
+    # Human-readable prefix plus a collision-resistant URL digest. Distinct
+    # repositories must never share a writable git cache directory.
+    parsed = urlparse(github_url)
+    name = parsed.path.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
+    slug = re.sub(r"\W+", "_", name).strip("_")
+    slug += "-" + hashlib.sha256(github_url.encode()).hexdigest()[:16]
     repo_dir = CACHE_ROOT / slug
 
     ok, msg = _ensure_clone(github_url, repo_dir)
@@ -62,6 +76,34 @@ def upstream_log(github_url: str, commit: str, crash_file: str, max_bytes: int =
         kept = log[:max_bytes].rsplit("\n", 1)[0]
         return kept + f"\n[... truncated, {log.count(chr(10))} total commits]"
     return log
+
+
+def _validated_upstream_url(value: str) -> str:
+    """Allow only credential-free HTTPS repositories on approved hosts."""
+    parsed = urlparse(value)
+    allowed = {
+        host.strip().lower()
+        for host in os.environ.get(
+            "VULN_PIPELINE_NOVELTY_HOSTS", "github.com"
+        ).split(",")
+        if host.strip()
+    }
+    if parsed.scheme != "https":
+        raise ValueError("only https URLs are allowed")
+    if parsed.username or parsed.password:
+        raise ValueError("embedded credentials are not allowed")
+    if parsed.port is not None:
+        raise ValueError("explicit ports are not allowed")
+    if (parsed.hostname or "").lower() not in allowed:
+        raise ValueError(
+            f"host {(parsed.hostname or '(missing)')!r} is not approved"
+        )
+    if parsed.query or parsed.fragment:
+        raise ValueError("query strings and fragments are not allowed")
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 2 or any(part in (".", "..") for part in parts):
+        raise ValueError("expected /owner/repository path")
+    return value
 
 
 def _ensure_clone(github_url: str, repo_dir: Path) -> tuple[bool, str]:
