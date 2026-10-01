@@ -88,6 +88,12 @@ def resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
     Returns the env dict to set on the agent container, or None if no auth is
     configured. Misconfigured-but-selected providers print a specific diagnostic
     to stderr and return None (callers then print NO_AUTH_MSG)."""
+    from . import agent_backends
+    backend = agent_backends.selected()
+    if backend != "claude":
+        if provider:
+            raise ValueError("--provider applies only to the Claude backend; use --agent-backend")
+        return agent_backends.auth_env(backend)
     selected = _selected_provider(provider)
     if selected == "bedrock":
         region = os.environ.get("AWS_REGION")
@@ -184,6 +190,12 @@ def required_egress_hosts(provider: str | None = None) -> list[str]:
     """host:port entries the current provider needs on the proxy allowlist.
     Called from setup_sandbox.sh / vp-sandboxed via ``python3 -c``; exits
     non-zero on misconfig so the shell ``|| die`` fires."""
+    from . import agent_backends
+    backend = agent_backends.selected()
+    if backend != "claude":
+        if provider:
+            raise ValueError("--provider applies only to the Claude backend")
+        return agent_backends.egress_hosts(backend)
     selected = _selected_provider(provider)
     if selected == "bedrock":
         region = os.environ.get("AWS_REGION", "")

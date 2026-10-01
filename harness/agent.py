@@ -29,7 +29,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import docker_ops, sandbox
+from . import agent_backends, docker_ops, sandbox
 from .io_utils import open_private_text
 
 
@@ -238,7 +238,7 @@ async def run_agent(
     tools: list[str] | None = None,
     system_prompt: str | None = None,
 ) -> AgentResult:
-    """Run a Claude Code agent session via headless CLI inside ``container``.
+    """Run the selected agent CLI inside ``container``.
 
     Invokes ``docker exec <container> claude -p --output-format stream-json``
     and streams the JSONL output. Permission mode comes from
@@ -258,32 +258,52 @@ async def run_agent(
     transcript on disk. Every `heartbeat_every` assistant turns, a progress
     line is printed so long runs don't look hung.
     """
-    # API key / HTTPS_PROXY are on the container's env (set at docker_ops.run
-    # time); only the per-exec overrides go via -e. CLAUDECODE="" stops the
-    # nested-session check; IS_SANDBOX=1 lets the CLI accept bypassPermissions.
-    cli_argv = [*docker_ops.command("exec", "-i"),
-                "-e", "CLAUDECODE=", "-e", "IS_SANDBOX=1",
-                "-w", "/work", "--",
-                container, "claude"]
+    backend = agent_backends.selected()
+    if backend == "gemini":
+        # System settings override target-controlled project settings. tools.core
+        # is an actual tool allowlist; --allowed-tools would only skip prompts.
+        gemini_tools = [] if tools == [] else [
+            "read_file", "write_file", "replace", "run_shell_command", "glob", "grep"
+        ]
+        config = {"model": {"maxSessionTurns": max_turns},
+                  "tools": {"core": gemini_tools},
+                  "mcp": {"allowed": []},
+                  "privacy": {"usageStatisticsEnabled": False}}
+        docker_ops.write_file(container, "/tmp/ivcd-gemini-settings.json",
+                              json.dumps(config).encode())
+    if backend != "claude":
+        constraints = [f"Complete within {max_turns} agent turns."]
+        if tools == []:
+            constraints.append("Do not use any tools; answer from the supplied evidence only.")
+        if system_prompt:
+            constraints.append(system_prompt)
+        prompt = "\n\n".join([*constraints, prompt])
     result = AgentResult()
     attempt = 0
     assistant_count = 0
     tool_call_count = 0
+    gemini_text = ""
 
     transcript_file = open_private_text(transcript_path, "w") if transcript_path else None
     try:
         while True:
-            cmd = build_claude_argv(
-                cli_argv,
-                model=model,
-                max_turns=max_turns,
-                tools=tools,
-                permission_mode=sandbox.permission_mode(),
-                system_prompt=system_prompt,
+            resume_id = result.session_id if attempt > 0 else None
+            cmd = agent_backends.command(
+                container, backend, model=model, max_turns=max_turns,
+                tools=tools, system_prompt=system_prompt,
+                resume_id=resume_id, sandboxed=bool(sandbox.runtime()),
             )
-            if attempt > 0 and result.session_id:
-                cmd += ["--resume", result.session_id, "continue"]
-                prompt_stdin: bytes | None = None
+            if backend == "gemini":
+                # A system override prevents untrusted .gemini/settings.json
+                # from restoring tools or enabling MCP servers.
+                pos = cmd.index("-w")
+                cmd[pos:pos] = ["-e", "GEMINI_CLI_SYSTEM_SETTINGS_PATH=/tmp/ivcd-gemini-settings.json",
+                                "-e", "GEMINI_CLI_TRUST_WORKSPACE=true"]
+            if resume_id:
+                if backend == "claude":
+                    prompt_stdin: bytes | None = None
+                else:
+                    prompt_stdin = b"continue"
             else:
                 # Keep target-derived prompts out of host process listings.
                 # Bounded parallelism prevents the high-fanout stdin startup
@@ -318,36 +338,42 @@ async def run_agent(
                     if not line:
                         continue
                     try:
-                        msg = json.loads(line)
+                        event = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if backend == "gemini" and event.get("type") == "message" \
+                            and event.get("role") == "assistant" and event.get("delta"):
+                        gemini_text += str(event.get("content") or event.get("text") or "")
+                    if backend == "gemini" and event.get("type") == "result" \
+                            and gemini_text and not event.get("response"):
+                        event = {**event, "response": gemini_text}
+                    for msg in agent_backends.normalize(backend, event):
+                        result.messages.append(msg)
+                        if progress_prefix:
+                            _progress_line(msg, progress_prefix)
+                        if transcript_file:
+                            transcript_file.write(
+                                json.dumps(_truncate_tool_results(msg)) + "\n"
+                            )
+                            transcript_file.flush()
+                            os.fsync(transcript_file.fileno())
 
-                    result.messages.append(msg)
-                    if progress_prefix:
-                        _progress_line(msg, progress_prefix)
-                    if transcript_file:
-                        transcript_file.write(
-                            json.dumps(_truncate_tool_results(msg)) + "\n"
-                        )
-                        transcript_file.flush()
-                        os.fsync(transcript_file.fileno())
-
-                    mtype = msg.get("type")
-                    if mtype == "assistant":
-                        assistant_count += 1
-                        tool_call_count += sum(
-                            1 for b in msg.get("message", {}).get("content", [])
-                            if isinstance(b, dict) and b.get("type") == "tool_use"
-                        )
-                        if assistant_count % heartbeat_every == 0:
-                            print(f"  [agent] {tool_call_count} tool calls "
-                                  f"({assistant_count} msgs)")
-                    elif mtype == "system" and msg.get("subtype") == "init":
-                        sid = msg.get("session_id")
-                        if sid and result.session_id is None:
-                            result.session_id = sid
-                    elif mtype == "result":
-                        result.result_message = msg
+                        mtype = msg.get("type")
+                        if mtype == "assistant":
+                            assistant_count += 1
+                            tool_call_count += sum(
+                                1 for b in msg.get("message", {}).get("content", [])
+                                if isinstance(b, dict) and b.get("type") == "tool_use"
+                            )
+                            if assistant_count % heartbeat_every == 0:
+                                print(f"  [agent] {tool_call_count} tool calls "
+                                      f"({assistant_count} msgs)")
+                        elif mtype == "system" and msg.get("subtype") == "init":
+                            sid = msg.get("session_id")
+                            if sid and result.session_id is None:
+                                result.session_id = sid
+                        elif mtype == "result":
+                            result.result_message = msg
                         # Agents with run_in_background bash tasks keep the CLI
                         # stream alive past the result message: each pending
                         # task_notification re-inits the session inline. Break
@@ -355,13 +381,13 @@ async def run_agent(
                         # exhaustion — otherwise a fuzzing agent with many
                         # background tasks never terminates. Error results
                         # route through the resume path.
-                        if msg.get("is_error"):
-                            raise RuntimeError(
-                                f"CLI result is_error: {msg.get('result')}"
-                            )
-                        proc.terminate()
-                        await proc.wait()
-                        return result
+                            if msg.get("is_error"):
+                                raise RuntimeError(
+                                    f"CLI result is_error: {msg.get('result')}"
+                                )
+                            proc.terminate()
+                            await proc.wait()
+                            return result
 
                 # Stream ended without a result message — process died.
                 rc = await proc.wait()

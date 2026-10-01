@@ -155,6 +155,6 @@ def test_agent_image_ships_prompted_tools():
     import inspect
     from harness import agent_image
 
-    src = inspect.getsource(agent_image.ensure)
+    src = inspect.getsource(agent_image._agent_dockerfile)
     for tool in ("xxd", "gdb"):
         assert tool in src, f"{tool} missing from agent base image apt-get"

@@ -178,6 +178,35 @@ def image_exists(tag: str) -> bool:
     return r.returncode == 0
 
 
+def image_id(tag: str) -> str:
+    """Return the immutable OCI image ID behind ``tag``.
+
+    Derived images must be keyed to this value rather than the mutable tag or
+    they can silently retain an older target filesystem after a rebuild.
+    """
+    r = subprocess.run(
+        command("image", "inspect", "--format", "{{.Id}}", tag),
+        capture_output=True,
+        text=True,
+    )
+    value = r.stdout.strip()
+    if r.returncode != 0 or not value:
+        detail = r.stderr.strip() or f"image {tag!r} has no ID"
+        raise RuntimeError(f"unable to inspect image {tag!r}: {detail}")
+    return value
+
+
+def tag(source: str, destination: str) -> str:
+    """Create or update a local image tag."""
+    subprocess.run(
+        command("tag", source, destination),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return destination
+
+
 def exec_sh(
     container: str, shell_command: str, timeout: int | None = None
 ) -> tuple[int, str, str]:
