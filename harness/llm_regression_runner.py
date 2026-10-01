@@ -105,9 +105,9 @@ def _chat_completion(
         timeout=timeout,
     )
     if parsed.scheme == "https":
-        sock = ssl.create_default_context().wrap_socket(
-            sock, server_hostname=target_host
-        )
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        sock = context.wrap_socket(sock, server_hostname=target_host)
 
     path = (parsed.path.rstrip("/") or "/v1") + "/chat/completions"
     if parsed.query:
