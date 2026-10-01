@@ -11,7 +11,6 @@ iteration's prompt so the agent sees which tier failed and why.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 from pathlib import Path
@@ -20,6 +19,7 @@ from . import docker_ops, sandbox
 from .agent import AgentResult, parse_xml_tag, run_agent
 from .artifacts import CrashArtifact, PatchVerdict
 from .config import TargetConfig
+from .io_utils import atomic_write_bytes, atomic_write_json
 from .patch_grade import grade_patch
 from .profiles import build_patch_prompt, is_web
 
@@ -194,17 +194,12 @@ def _write_result(
     iterations: int,
     timings: dict[str, float],
 ) -> None:
-    (out_dir / "patch.diff").write_bytes(diff)
-    (out_dir / "patch_result.json").write_text(
-        json.dumps(
-            {
-                "verdict": verdict.to_dict(),
-                "rationale": rationale,
-                "variants_checked": variants,
-                "bypass_considered": bypass,
-                "iterations": iterations,
-                "timings": timings,
-            },
-            indent=2,
-        )
-    )
+    atomic_write_bytes(out_dir / "patch.diff", diff)
+    atomic_write_json(out_dir / "patch_result.json", {
+        "verdict": verdict.to_dict(),
+        "rationale": rationale,
+        "variants_checked": variants,
+        "bypass_considered": bypass,
+        "iterations": iterations,
+        "timings": timings,
+    })

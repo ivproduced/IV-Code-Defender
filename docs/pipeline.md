@@ -65,18 +65,20 @@ the crashing input file (not a written report). Parallel find agents share a
 `found_bugs.jsonl` log and must justify why their addition is not a duplicate 
 of something already listed before adding to it.
 
-**Grade.** A second agent in a fresh container re-runs the PoC and checks that the 
-crash is real (i.e., it reproduces, it's in project code, and it isn't just memory 
-exhaustion). The only thing that crosses from the find container to the grader is 
-the PoC bytes, so the grader isn't influenced by the find agent's reasoning. 
-Flaky-but-real crashes (races, heap-layout-dependent) can pass this step, though
-they will receive a lower score. Each run's verdict is written to `run_NNN/result.json` 
-as soon as the grader agent finishes.
+**Grade.** A pipeline-owned oracle re-runs the PoC three times in a fresh,
+credential-free, networkless container and deterministically checks
+reproduction, resource-failure markers, project frames, and crash class and
+site consistency with the submitted trace.
+A separate no-tools agent evaluates only the remaining semantic evidence and
+cannot override a failed machine criterion. Only the PoC bytes cross from the
+find container. Flaky-but-real crashes that reproduce at least two out of three
+times can pass with a lower semantic score. Each verdict is atomically written
+to `run_NNN/result.json` as soon as grading finishes.
 
 **Judge.** When a finding passes the grader, a short no-tools agent compares 
 the crash against the bugs already in `reports/manifest.jsonl` and decides 
 whether the finding is a new bug (in which case it's accepted), a cleaner example 
-of a known bug (in which case it replaces the old version), or a duplicate (in 
+of a known bug (in which case a comparison chooses the canonical report), or a duplicate (in
 which case it's skipped). Judge agents run serially so that two duplicate findings 
 arriving around the same time aren't accidentally both classified as new. The
 judge stage is only run when the `--stream` modifier is used.
@@ -88,6 +90,10 @@ sketch of the escalation path, and a severity. A separate grader agent then scor
 the report, checking that its claims are backed by evidence (e.g., line numbers,
 observed re-runs) rather than plausible prose. Reports land in `reports/bug_NN/report.json` 
 and include the grader's score so you can tell which reports are most trustworthy.
+Streaming attempts also write `report_runNNN.json`; `--resume --stream` retries
+judged attempts without a completion record. Replacement reports for the same
+bug run in judge order, and a failed replacement leaves the current report in
+place.
 The `--novelty` modifier (off by default) lets the orchestrator check the upstream
 git history so the report can include whether the bug has already been fixed there.
 Each completed report also carries a CWE and NIST SP 800-53 Release 5.2.0
