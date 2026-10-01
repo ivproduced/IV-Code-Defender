@@ -65,8 +65,6 @@ def _backend_dockerfile(target_tag: str, backend: str) -> str:
             npm install -g {package}
         WORKDIR /work
     """)
-
-
 def _digest_tag(target_tag: str, target_image_id: str) -> str:
     digest = target_image_id.removeprefix("sha256:")
     if not re.fullmatch(r"[0-9a-fA-F]{12,}", digest):
