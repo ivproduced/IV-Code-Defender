@@ -43,7 +43,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import docker_ops, providers, sandbox, compliance
+from . import docker_ops, providers, sandbox, compliance, llm_regression
 from .agent import color
 from .artifacts import CrashArtifact, RunResult
 from .asan import asan_excerpt, crash_reason, top_frame
@@ -1014,9 +1014,33 @@ def main() -> int:
     p_oscal.add_argument("-o", "--out", type=Path, default=None,
                          help="Output path (default: <results_dir>/oscal.json)")
 
+    p_llm = sub.add_parser(
+        "llm-regression",
+        help="Run a prompt-boundary regression corpus against an OpenAI-compatible model",
+    )
+    p_llm.add_argument("corpus", type=Path,
+                       help="Versioned JSON regression corpus")
+    p_llm.add_argument("--endpoint",
+                       default=os.environ.get("VULN_PIPELINE_LLM_ENDPOINT"),
+                       help="OpenAI-compatible base URL, e.g. http://host:8000/v1")
+    p_llm.add_argument("--model",
+                       default=os.environ.get("VULN_PIPELINE_LLM_MODEL"),
+                       help="Model identifier (or set VULN_PIPELINE_LLM_MODEL)")
+    p_llm.add_argument("--results-dir", type=Path,
+                       default=Path("./results/llm-regression"),
+                       help="Output root (default: ./results/llm-regression)")
+    p_llm.add_argument("--image", default=llm_regression.DEFAULT_EVALUATOR_IMAGE,
+                       help="Existing agent image used for the gVisor evaluator")
+    p_llm.add_argument("--timeout", type=int, default=60,
+                       help="Per-request timeout in seconds (default: 60)")
+    p_llm.add_argument("--engagement-context", type=Path, default=None,
+                       help="Optional engagement scope appended to the fixed system prompt")
+    p_llm.add_argument("--dangerously-no-sandbox", dest="dangerously_no_sandbox",
+                       action="store_true", help="See `run --help`.")
+
     args = parser.parse_args()
 
-    if args.command in ("run", "recon", "report", "patch"):
+    if args.command in ("run", "recon", "report", "patch", "llm-regression"):
         if err := sandbox.require(args.dangerously_no_sandbox):
             print(err, file=sys.stderr)
             return 1
@@ -1031,6 +1055,8 @@ def main() -> int:
         return _cmd_report(args)
     if args.command == "patch":
         return _cmd_patch(args)
+    if args.command == "llm-regression":
+        return llm_regression.command(args)
     if args.command == "oscal":
         out = args.out or (args.results_dir / "oscal.json")
         doc = compliance.build_oscal(args.results_dir)
