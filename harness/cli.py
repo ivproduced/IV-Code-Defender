@@ -908,13 +908,7 @@ def _record_or_verify_batch_image(
             metadata = json.loads(metadata_path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             return f"batch metadata is unreadable: {exc}"
-        expected = metadata.get("target_image_id")
-        if expected != target_image_id:
-            return (
-                "resume target image mismatch: batch used "
-                f"{expected!r}, current build is {target_image_id!r}"
-            )
-        return None
+        return _batch_metadata_mismatch(metadata, target, target_image_id, "resume")
 
     atomic_write_json(metadata_path, {
         "schema_version": 1,
@@ -933,6 +927,27 @@ def _record_or_verify_batch_image(
     return None
 
 
+def _batch_metadata_mismatch(
+    metadata: object, target: TargetConfig, image_id: str, context: str
+) -> str | None:
+    """Reject a batch created for another target, source commit, or image."""
+    if not isinstance(metadata, dict):
+        return "batch metadata must be a JSON object"
+    for field, current in (
+        ("target", target.name),
+        ("source_commit", target.commit),
+        ("target_image_id", image_id),
+    ):
+        expected = metadata.get(field)
+        if expected != current:
+            label = "image" if field == "target_image_id" else field.replace("_", " ")
+            return (
+                f"{context} {label} mismatch: batch used {expected!r}, "
+                f"current target uses {current!r}"
+            )
+    return None
+
+
 def _pin_target_for_existing_batch(
     results_root: Path, target: TargetConfig
 ) -> tuple[TargetConfig | None, str | None]:
@@ -944,14 +959,11 @@ def _pin_target_for_existing_batch(
     metadata_path = results_root / "batch_metadata.json"
     if metadata_path.exists():
         try:
-            expected = json.loads(metadata_path.read_text()).get("target_image_id")
+            metadata = json.loads(metadata_path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             return None, f"batch metadata is unreadable: {exc}"
-        if expected != current_id:
-            return None, (
-                "target image does not match batch metadata: "
-                f"expected {expected!r}, current build is {current_id!r}"
-            )
+        if error := _batch_metadata_mismatch(metadata, target, current_id, "batch"):
+            return None, error
     frozen_tag = _freeze_target_image(target, current_id)
     return replace(target, image_tag=frozen_tag), None
 

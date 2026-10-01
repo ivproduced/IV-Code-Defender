@@ -33,9 +33,9 @@ def agent_tag(target_tag: str) -> str:
     return f"{target_tag.replace(':', '-')}-agent:{CLAUDE_CODE_VERSION}"
 
 
-def _agent_dockerfile(target_tag: str) -> str:
+def _agent_dockerfile(base_image: str) -> str:
     return textwrap.dedent(f"""\
-        FROM {target_tag}
+        FROM {base_image}
         USER root
         RUN apt-get update && \\
             apt-get install -y --no-install-recommends nodejs npm ca-certificates xxd gdb && \\
@@ -45,12 +45,19 @@ def _agent_dockerfile(target_tag: str) -> str:
     """)
 
 
+def _base_image_tag(target_image_id: str) -> str:
+    """Name an exact local image without depending on its mutable target tag."""
+    digest = target_image_id.removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        raise ValueError(f"invalid target image ID: {target_image_id!r}")
+    return f"vuln-pipeline-agent-base:{digest.lower()}"
+
+
 def _digest_tag(target_tag: str, target_image_id: str) -> str:
     digest = target_image_id.removeprefix("sha256:")
-    if not re.fullmatch(r"[0-9a-fA-F]{12,}", digest):
-        raise ValueError(f"invalid target image ID: {target_image_id!r}")
+    base_tag = _base_image_tag(target_image_id)
     recipe = hashlib.sha256(
-        _agent_dockerfile(target_tag).encode("utf-8")
+        _agent_dockerfile(base_tag).encode("utf-8")
     ).hexdigest()[:12]
     base = agent_tag(target_tag).rsplit(":", 1)[0]
     return f"{base}:{CLAUDE_CODE_VERSION}-{digest[:16].lower()}-{recipe}"
@@ -79,7 +86,9 @@ def _ensure_for_image(target_tag: str, target_image_id: str) -> str:
         raise ValueError(f"invalid image tag: {target_tag!r}")
     tag = _digest_tag(target_tag, target_image_id)
     if not docker_ops.image_exists(tag):
-        _build(_agent_dockerfile(target_tag), tag)
+        base_tag = _base_image_tag(target_image_id)
+        docker_ops.tag(target_image_id, base_tag)
+        _build(_agent_dockerfile(base_tag), tag)
     subprocess.run(
         docker_ops.command("tag", tag, latest_tag(target_tag)),
         check=True,

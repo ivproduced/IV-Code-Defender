@@ -1,6 +1,9 @@
 # Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 import json
+from dataclasses import replace
+
+import pytest
 
 from harness.cli import (
     _pin_target_for_existing_batch,
@@ -36,6 +39,23 @@ def test_resume_rejects_different_target_image(tmp_path):
     )
     assert error is not None
     assert "image mismatch" in error
+
+
+@pytest.mark.parametrize(
+    ("changed", "value", "message"),
+    [
+        ("name", "other-target", "target mismatch"),
+        ("commit", "b" * 40, "source commit mismatch"),
+    ],
+)
+def test_resume_rejects_different_batch_identity(tmp_path, changed, value, message):
+    image_id = "sha256:" + "a" * 64
+    _record_or_verify_batch_image(tmp_path, _target(), image_id, is_resume=False)
+    other = replace(_target(), **{changed: value})
+    error = _record_or_verify_batch_image(
+        tmp_path, other, image_id, is_resume=True
+    )
+    assert error is not None and message in error
 
 
 def test_legacy_resume_establishes_image_pin(tmp_path):
@@ -77,4 +97,24 @@ def test_existing_batch_rejects_rebuilt_different_image(tmp_path, monkeypatch):
     )
     pinned, error = _pin_target_for_existing_batch(tmp_path, _target())
     assert pinned is None
-    assert error is not None and "does not match" in error
+    assert error is not None and "image mismatch" in error
+
+
+@pytest.mark.parametrize(
+    ("changed", "value", "message"),
+    [
+        ("name", "other-target", "target mismatch"),
+        ("commit", "b" * 40, "source commit mismatch"),
+    ],
+)
+def test_existing_batch_rejects_different_identity(
+    tmp_path, monkeypatch, changed, value, message
+):
+    image_id = "sha256:" + "a" * 64
+    _record_or_verify_batch_image(tmp_path, _target(), image_id, is_resume=False)
+    monkeypatch.setattr("harness.cli.docker_ops.image_exists", lambda _tag: True)
+    monkeypatch.setattr("harness.cli.docker_ops.image_id", lambda _tag: image_id)
+    other = replace(_target(), **{changed: value})
+    pinned, error = _pin_target_for_existing_batch(tmp_path, other)
+    assert pinned is None
+    assert error is not None and message in error
