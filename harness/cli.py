@@ -371,6 +371,7 @@ async def _run_once(
             transcript_path=str(out_dir / "grade_transcript.jsonl"),
             progress_prefix=f"[grade:{run_idx}]",
             system_prompt=system_prompt,
+            accept_dos=accept_dos,
         )
     except Exception as e:
         traceback.print_exc()

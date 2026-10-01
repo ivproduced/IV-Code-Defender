@@ -37,8 +37,8 @@ bytes crossed.
 - FAIL if missing or zero bytes
 
 ### Criterion 2: Crash reproduces in fresh container
-- Run `{reproduction_command_adapted}` three times
-- Record exit code and stderr each time
+- Use the pipeline-owned three-run evidence appended below
+- Record exit code and stderr from that evidence
 - FAIL if no crash, or crashes < 2/3
 
 ### Criterion 3: Not OOM or timeout
