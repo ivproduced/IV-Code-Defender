@@ -1,6 +1,6 @@
 # Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
-"""Model-provider resolution for the agent fleet.
+"""Claude API-provider resolution for the agent fleet.
 
 The fleet runs `claude -p` inside each gVisor container, so the backend must be
 one Claude Code speaks natively: the Anthropic API, Amazon Bedrock, or Google
@@ -8,9 +8,8 @@ Vertex. Bedrock/Vertex are selected purely through environment variables on the
 container — no code path change. A custom gateway (e.g. an Anthropic-compatible
 Azure deployment) is supported via ANTHROPIC_BASE_URL passthrough.
 
-OpenAI, Azure-OpenAI and Ollama cannot host Claude Code's tool-calling loop;
-selecting them for the fleet raises a clear error. They are reserved for a
-future non-agent static pass.
+Other agent CLIs are selected with --agent-backend. This module only handles
+the three API backends supported by Claude Code.
 
 resolve_provider_env() returns the dict merged onto the container at
 `docker run` time, plus the egress hosts the allowlist proxy must permit.

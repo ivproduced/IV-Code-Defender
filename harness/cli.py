@@ -43,7 +43,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import docker_ops, providers, sandbox, compliance
+from . import agent_backends, docker_ops, providers, sandbox, compliance
 from .agent import color
 from .artifacts import CrashArtifact, RunResult
 from .asan import asan_excerpt, crash_reason, top_frame
@@ -84,11 +84,17 @@ def _resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
     Bedrock/Vertex authenticate through scoped cloud credentials. The same
     resolver is used by sandbox setup to derive the provider egress allowlist.
     """
-    return _resolve_environment_auth(provider)
+    try:
+        return _resolve_environment_auth(provider)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
 
 
 def _provider_name(provider: str | None) -> str:
     """Report the selected provider for both CLI and environment-based modes."""
+    if agent_backends.selected() != "claude":
+        return agent_backends.selected()
     if provider is not None:
         return providers.resolve_provider(provider)
     if os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1":
@@ -96,6 +102,14 @@ def _provider_name(provider: str | None) -> str:
     if os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1":
         return "vertex"
     return "anthropic"
+
+
+def _auth_error() -> str:
+    return {
+        "codex": "error: codex backend requires OPENAI_API_KEY",
+        "gemini": "error: gemini backend requires GEMINI_API_KEY",
+        "ollama": "error: ollama backend requires VULN_PIPELINE_OLLAMA_URL",
+    }.get(agent_backends.selected(), NO_AUTH_MSG)
 
 
 def _resolve_target_dir(target: str) -> Path:
@@ -904,6 +918,9 @@ def main() -> int:
     p_run.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
                        choices=providers.FLEET_PROVIDERS,
                        help="Model provider: anthropic (default), bedrock, vertex")
+    p_run.add_argument("--agent-backend", choices=agent_backends.BACKENDS,
+                          default=agent_backends.selected(),
+                          help="Agent CLI: claude (default), codex, gemini, ollama")
     p_run.add_argument("--results-dir", default="./results", help="Output root")
     p_run.add_argument("--resume", type=Path, default=None, metavar="DIR",
                        help="Resume a partially-completed batch dir (results/<target>/<ts>/). "
@@ -940,6 +957,9 @@ def main() -> int:
     p_recon.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
                        choices=providers.FLEET_PROVIDERS,
                        help="Model provider: anthropic (default), bedrock, vertex")
+    p_recon.add_argument("--agent-backend", choices=agent_backends.BACKENDS,
+                          default=agent_backends.selected(),
+                          help="Agent CLI: claude (default), codex, gemini, ollama")
     p_recon.add_argument("--max-turns", type=int, default=RECON_MAX_TURNS,
                          help=f"Recon-agent turn budget (default {RECON_MAX_TURNS})")
     p_recon.add_argument("--engagement-context", type=Path, default=None,
@@ -960,6 +980,9 @@ def main() -> int:
     p_report.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
                        choices=providers.FLEET_PROVIDERS,
                        help="Model provider: anthropic (default), bedrock, vertex")
+    p_report.add_argument("--agent-backend", choices=agent_backends.BACKENDS,
+                          default=agent_backends.selected(),
+                          help="Agent CLI: claude (default), codex, gemini, ollama")
     p_report.add_argument("--parallel", action="store_true",
                           help="Run report agents concurrently")
     p_report.add_argument("--max-turns", type=int, default=REPORT_MAX_TURNS,
@@ -990,6 +1013,9 @@ def main() -> int:
     p_patch.add_argument("--provider", default=os.environ.get("VULN_PIPELINE_PROVIDER"),
                        choices=providers.FLEET_PROVIDERS,
                        help="Model provider: anthropic (default), bedrock, vertex")
+    p_patch.add_argument("--agent-backend", choices=agent_backends.BACKENDS,
+                          default=agent_backends.selected(),
+                          help="Agent CLI: claude (default), codex, gemini, ollama")
     p_patch.add_argument("--parallel", action="store_true",
                          help="Run patch agents concurrently")
     p_patch.add_argument("--max-turns", type=int, default=PATCH_MAX_TURNS,
@@ -1015,6 +1041,8 @@ def main() -> int:
                          help="Output path (default: <results_dir>/oscal.json)")
 
     args = parser.parse_args()
+    if hasattr(args, "agent_backend"):
+        os.environ[agent_backends.ENV] = args.agent_backend
 
     if args.command in ("run", "recon", "report", "patch"):
         if err := sandbox.require(args.dangerously_no_sandbox):
@@ -1051,7 +1079,7 @@ def _cmd_run(args) -> int:
         return 1
     agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
-        print(NO_AUTH_MSG, file=sys.stderr)
+        print(_auth_error(), file=sys.stderr)
         return 1
 
     # Model: required, via --model or env
@@ -1123,7 +1151,7 @@ def _cmd_recon(args) -> int:
 
     agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
-        print(NO_AUTH_MSG, file=sys.stderr)
+        print(_auth_error(), file=sys.stderr)
         return 1
 
     if not args.model:
@@ -1310,7 +1338,7 @@ def _cmd_report(args) -> int:
 
     agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
-        print(NO_AUTH_MSG, file=sys.stderr)
+        print(_auth_error(), file=sys.stderr)
         return 1
 
     if not args.model:
@@ -1409,7 +1437,7 @@ def _cmd_patch(args) -> int:
         return 1
     agent_env = _resolve_auth_env(getattr(args, "provider", None))
     if agent_env is None:
-        print(NO_AUTH_MSG, file=sys.stderr)
+        print(_auth_error(), file=sys.stderr)
         return 1
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)

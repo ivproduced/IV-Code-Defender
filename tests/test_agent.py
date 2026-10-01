@@ -7,7 +7,19 @@ from harness.agent import DEFAULT_TOOLS, build_claude_argv
 CLI_ARGV = ["docker", "exec", "-i", "--", "vp-canary", "claude"]
 
 
-def test_empty_tool_list_uses_defaults():
+def test_none_tool_list_uses_defaults():
+    argv = build_claude_argv(
+        CLI_ARGV,
+        model="model",
+        max_turns=10,
+        tools=None,
+        permission_mode="bypassPermissions",
+    )
+
+    assert argv[argv.index("--tools") + 1] == ",".join(DEFAULT_TOOLS)
+
+
+def test_empty_tool_list_disables_tools():
     argv = build_claude_argv(
         CLI_ARGV,
         model="model",
@@ -16,7 +28,7 @@ def test_empty_tool_list_uses_defaults():
         permission_mode="bypassPermissions",
     )
 
-    assert argv[argv.index("--tools") + 1] == ",".join(DEFAULT_TOOLS)
+    assert argv[argv.index("--tools") + 1] == ""
 
 
 def test_custom_tools_and_system_prompt_are_preserved():
