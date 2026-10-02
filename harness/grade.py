@@ -24,7 +24,8 @@ from .artifacts import CrashArtifact, GraderVerdict
 from .asan import crash_reason, top_frame
 from .config import TargetConfig
 from .io_utils import atomic_write_bytes
-from .profiles import build_grade_prompt, is_web, load_web_manifest
+from .profiles import (build_grade_prompt, is_web, load_web_manifest,
+                       trusted_reproduction_command)
 from .prompts.untrusted import make_nonce, untrusted_block
 
 
@@ -62,19 +63,10 @@ async def run_grade(
     workspace_dir: host-side results dir where we also persist poc.bin so
     it survives the container teardown.
     """
-    # Path-substitution sanity: replace() below no-ops silently if poc_path
-    # isn't in reproduction_command. That's a find-agent output inconsistency
-    # — reject it here rather than hand the grader an unadapted command.
-    if crash.poc_path not in crash.reproduction_command:
-        raise ValueError(
-            f"poc_path {crash.poc_path!r} not found in reproduction_command "
-            f"{crash.reproduction_command!r} — find-agent output is inconsistent"
-        )
-
     grade_started = time.time()
     artifact_name = "replay.json" if is_web(target.profile) else "poc.bin"
     workspace_artifact = f"/tmp/{artifact_name}"
-    adapted_cmd = crash.reproduction_command.replace(crash.poc_path, workspace_artifact)
+    adapted_cmd = trusted_reproduction_command(target, crash, workspace_artifact)
 
     os.makedirs(workspace_dir, exist_ok=True)
     atomic_write_bytes(os.path.join(workspace_dir, artifact_name), crash.poc_bytes)

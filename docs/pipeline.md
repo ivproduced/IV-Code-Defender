@@ -65,13 +65,14 @@ the crashing input file (not a written report). Parallel find agents share a
 `found_bugs.jsonl` log and must justify why their addition is not a duplicate 
 of something already listed before adding to it.
 
-**Grade.** A second agent in a fresh container re-runs the PoC and checks that the 
-crash is real (i.e., it reproduces, it's in project code, and it isn't just memory 
-exhaustion). The only thing that crosses from the find container to the grader is 
-the PoC bytes, so the grader isn't influenced by the find agent's reasoning. 
-Flaky-but-real crashes (races, heap-layout-dependent) can pass this step, though
-they will receive a lower score. Each run's verdict is written to `run_NNN/result.json` 
-as soon as the grader agent finishes.
+**Grade.** A pipeline-owned oracle runs the configured target binary with the
+PoC bytes three times in a fresh, credential-free, networkless container. It
+checks the crash class, project frames, and site consistency. The finder’s
+reproduction command is checked against the configured binary and input path,
+then discarded; it is never executed by the grader. A separate no-tools agent
+evaluates the remaining semantic evidence and cannot override a failed machine
+criterion. Each verdict is written to `run_NNN/result.json` as soon as grading
+finishes.
 
 **Judge.** When a finding passes the grader, a short no-tools agent compares 
 the crash against the bugs already in `reports/manifest.jsonl` and decides 

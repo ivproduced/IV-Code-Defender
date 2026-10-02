@@ -25,7 +25,7 @@ def test_bedrock_env(monkeypatch):
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
     pe = providers.resolve_provider_env("bedrock")
     assert pe.env["CLAUDE_CODE_USE_BEDROCK"] == "1"
-    assert "bedrock-runtime.us-west-2.amazonaws.com:443" in pe.egress_hosts
+    assert set(pe.egress_hosts) == {"bedrock-runtime.us-west-2.amazonaws.com:443"}
 
 
 def test_vertex_env(monkeypatch, tmp_path):
@@ -36,8 +36,10 @@ def test_vertex_env(monkeypatch, tmp_path):
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(credentials))
     pe = providers.resolve_provider_env("vertex")
     assert pe.env["CLAUDE_CODE_USE_VERTEX"] == "1"
-    assert "europe-west4-aiplatform.googleapis.com:443" in pe.egress_hosts
-    assert "oauth2.googleapis.com:443" in pe.egress_hosts
+    assert set(pe.egress_hosts) == {
+        "europe-west4-aiplatform.googleapis.com:443",
+        "oauth2.googleapis.com:443",
+    }
 
 
 @pytest.mark.parametrize("p", ["openai", "azure", "ollama"])

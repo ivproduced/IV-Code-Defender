@@ -1,9 +1,14 @@
 # Copyright 2026 IVProduced contributors
 # SPDX-License-Identifier: Apache-2.0
 """Profile selection and replay-manifest contract tests."""
+import json
+
+import pytest
+
 from harness.artifacts import CrashArtifact
 from harness.config import TargetConfig
-from harness.profiles import build_find_prompt, build_grade_prompt, load_web_manifest
+from harness.profiles import (build_find_prompt, build_grade_prompt, load_web_manifest,
+                              trusted_reproduction_command)
 from harness.prompts.find_prompt import build_find_prompt as build_cpp_find_prompt
 
 
@@ -92,3 +97,29 @@ def test_web_manifest_must_match_configured_replay_contract():
         assert "detection_signal" in str(exc)
     else:
         raise AssertionError("manifest with an unconfigured detection signal accepted")
+
+
+def test_cpp_replay_rejects_find_agent_shell_command():
+    target = _target("cpp_asan")
+    crash = CrashArtifact(
+        poc_path="/tmp/poc.bin", poc_bytes=b"x",
+        reproduction_command="printf fake-ASAN-output /tmp/poc.bin; exit 1",
+        crash_type="heap-buffer-overflow", crash_output="", exit_code=1,
+    )
+    with pytest.raises(ValueError, match="configured binary"):
+        trusted_reproduction_command(target, crash, "/tmp/poc.bin")
+    good = CrashArtifact(**{
+        **crash.__dict__, "reproduction_command": "/work/server /tmp/poc.bin",
+    })
+    assert trusted_reproduction_command(target, good, "/tmp/saved.bin") == "/work/server /tmp/saved.bin"
+
+
+def test_web_replay_uses_manifest_command():
+    target = _target()
+    manifest = _manifest()
+    crash = CrashArtifact(
+        poc_path="/tmp/replay.json", poc_bytes=json.dumps(manifest).encode(),
+        reproduction_command=manifest["replay_command"], crash_type="idor",
+        crash_output="", exit_code=0, profile="python_web",
+    )
+    assert trusted_reproduction_command(target, crash, "/tmp/saved.json") == "/opt/vp/replay /tmp/saved.json"

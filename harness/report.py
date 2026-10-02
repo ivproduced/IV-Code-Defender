@@ -24,6 +24,7 @@ from .profiles import (
     build_report_prompt,
     get_profile,
     is_web,
+    trusted_reproduction_command,
 )
 
 
@@ -60,17 +61,11 @@ async def run_report(
     upstream_log: pre-computed `git log commit..HEAD -- file` output, or None
     to disable the novelty section entirely.
     """
-    if crash.poc_path not in crash.reproduction_command:
-        raise ValueError(
-            f"poc_path {crash.poc_path!r} not in reproduction_command "
-            f"{crash.reproduction_command!r}"
-        )
-
     with sandbox.agent_container(target.image_tag, container_name, agent_env) as container:
         artifact_name = "replay.json" if is_web(target.profile) else "poc.bin"
         workspace_artifact = f"/tmp/{artifact_name}"
         docker_ops.write_file(container, workspace_artifact, crash.poc_bytes)
-        adapted_cmd = crash.reproduction_command.replace(crash.poc_path, workspace_artifact)
+        adapted_cmd = trusted_reproduction_command(target, crash, workspace_artifact)
 
         os.makedirs(workspace_dir, exist_ok=True)
         with open(os.path.join(workspace_dir, artifact_name), "wb") as f:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from .config import PROFILES, TargetConfig
@@ -32,6 +33,29 @@ WEB_REPORT_SECTIONS = ("vector", "authorization", "impact", "chaining", "constra
 
 def is_web(profile: str) -> bool:
     return profile in WEB_PROFILES
+
+
+def trusted_reproduction_command(target: TargetConfig, crash, artifact_path: str) -> str:
+    """Build replay from target configuration and PoC bytes, not agent shell text."""
+    if is_web(target.profile):
+        manifest = load_web_manifest(crash.poc_bytes, target)
+        submitted = manifest["replay_command"]
+        parts = submitted.split(" ")
+        if crash.reproduction_command != submitted or crash.poc_path not in parts:
+            raise ValueError("web reproduction command does not match the replay manifest")
+        return " ".join(artifact_path if part == crash.poc_path else part for part in parts)
+
+    poc_path = crash.poc_path
+    if (not isinstance(poc_path, str) or not re.fullmatch(r"/[A-Za-z0-9._/-]+", poc_path)
+            or ".." in PurePosixPath(poc_path).parts):
+        raise ValueError(f"unsafe PoC path: {poc_path!r}")
+    expected = f"{target.binary_path} {poc_path}"
+    if crash.reproduction_command != expected:
+        raise ValueError(
+            "C/C++ reproduction command must be the configured binary and PoC path: "
+            f"{expected!r}"
+        )
+    return f"{target.binary_path} {artifact_path}"
 
 
 def _safe_manifest_command(value: object) -> str:
