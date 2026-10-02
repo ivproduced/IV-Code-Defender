@@ -147,7 +147,7 @@ configured effectively.
 DEFAULT_TOOLS = ["Read", "Write", "Bash"]
 
 def build_claude_argv(..., tools: list[str] | None, ...) -> list[str]:
-    effective_tools = tools if tools else DEFAULT_TOOLS
+    effective_tools = DEFAULT_TOOLS if tools is None else tools
     ...
     "--tools", ",".join(effective_tools),
 ```
@@ -171,7 +171,7 @@ proof-of-concept bytes:
 ```python
 with sandbox.agent_container(target.image_tag, container_name, agent_env) as container:
     docker_ops.write_file(container, "/tmp/poc.bin", crash.poc_bytes)
-    adapted_cmd = crash.reproduction_command.replace(crash.poc_path, "/tmp/poc.bin")
+    adapted_cmd = trusted_reproduction_command(target, crash, "/tmp/poc.bin")
 ```
 
 This is the model for identity integrations: a downstream system should receive
