@@ -229,10 +229,13 @@ single <finding> with category=none and a one-line note of what you covered.
 
 1. Collect `<finding>` blocks from all subagents. Drop `category=none`
    placeholders.
-   Parse `owasp_refs` into a list of codes; use `[]` for non-AI findings.
+   Parse `owasp_refs` into a list of recognized, unique codes; use `[]` for
+   non-AI findings.
 2. **Light dedupe** — if two findings cite the same `file:line` with the
-   same category, keep the one with the longer description and note the
-   duplicate id. (Heavy dedupe is `/triage`'s job; don't over-engineer here.)
+   same category, keep the one with the longer description. Before dropping
+   the other, union both `owasp_refs` lists into the retained finding and note
+   the duplicate id. Preserve refs from either finding regardless of which
+   description wins. (Heavy dedupe is `/triage`'s job; don't over-engineer here.)
 3. Assign stable ids `F-001`, `F-002`, ... in (severity desc, file, line)
    order.
 4. Before scoring, write the unscored `VULN-FINDINGS.json` with the schema in
