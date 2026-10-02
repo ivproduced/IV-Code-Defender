@@ -21,7 +21,7 @@ from .agent import AgentResult, parse_xml_tag, run_agent
 from .artifacts import CrashArtifact, PatchVerdict
 from .config import TargetConfig
 from .patch_grade import grade_patch
-from .profiles import build_patch_prompt, is_web
+from .profiles import build_patch_prompt, is_web, trusted_reproduction_command
 
 PATCH_MAX_TURNS = 200
 DEFAULT_MAX_ITERATIONS = 5
@@ -52,11 +52,9 @@ async def run_patch(
     """
     if not target.build_command:
         raise ValueError(f"target {target.name!r} has no build_command")
-    if crash.poc_path not in crash.reproduction_command:
-        raise ValueError(
-            f"poc_path {crash.poc_path!r} not in reproduction_command "
-            f"{crash.reproduction_command!r}"
-        )
+    trusted_reproduction_command(
+        target, crash, "/tmp/replay.json" if is_web(target.profile) else "/tmp/poc.bin"
+    )
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -78,10 +76,8 @@ async def run_patch(
             "/tmp/replay.json" if is_web(target.profile) else "/tmp/poc.bin",
             crash.poc_bytes,
         )
-        adapted_cmd = (
-            f"{target.replay_command} /tmp/replay.json"
-            if is_web(target.profile)
-            else crash.reproduction_command.replace(crash.poc_path, "/tmp/poc.bin")
+        adapted_cmd = trusted_reproduction_command(
+            target, crash, "/tmp/replay.json" if is_web(target.profile) else "/tmp/poc.bin"
         )
         # Ensure source_root is a git repo with a baseline commit so the
         # agent's `git diff` is deterministic. Gitignore the built binary so

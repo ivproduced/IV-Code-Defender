@@ -28,7 +28,7 @@ from .artifacts import CrashArtifact, PatchVerdict
 from .asan import project_frames
 from .config import TargetConfig
 from .find import run_find
-from .profiles import is_web
+from .profiles import is_web, trusted_reproduction_command
 from .prompts.patch_prompt import build_style_judge_prompt
 
 REATTACK_MAX_TURNS = 50
@@ -62,11 +62,9 @@ async def grade_patch(
             f"target {target.name!r} has no build_command — patch grading "
             f"requires an in-container rebuild step (set it in config.yaml)"
         )
-    if crash.poc_path not in crash.reproduction_command:
-        raise ValueError(
-            f"poc_path {crash.poc_path!r} not in reproduction_command "
-            f"{crash.reproduction_command!r}"
-        )
+    trusted_reproduction_command(
+        target, crash, "/tmp/replay.json" if is_web(target.profile) else "/tmp/poc.bin"
+    )
 
     evidence: dict[str, str] = {}
     timings: dict[str, float] = {}
@@ -151,11 +149,7 @@ async def grade_patch(
             await asyncio.to_thread(
                 docker_ops.write_file, container, workspace_artifact, crash.poc_bytes
             )
-            adapted = (
-                f"{target.replay_command} {workspace_artifact}"
-                if is_web(target.profile)
-                else crash.reproduction_command.replace(crash.poc_path, workspace_artifact)
-            )
+            adapted = trusted_reproduction_command(target, crash, workspace_artifact)
             try:
                 rc, out, err = await asyncio.to_thread(
                     docker_ops.exec_sh, container, adapted, timeout=600
