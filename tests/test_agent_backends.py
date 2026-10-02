@@ -61,7 +61,7 @@ def test_backend_commands_use_structured_streams_and_stdin(monkeypatch, backend,
     monkeypatch.setattr(docker_ops, "command", lambda *parts: ["docker", *parts])
     monkeypatch.setenv("VULN_PIPELINE_OLLAMA_URL", "http://ollama:11434/v1")
     argv = agent_backends.command("agent", backend, model="test-model",
-                                  max_turns=8, tools=[], system_prompt=None,
+                                  max_turns=8, tools=None, system_prompt=None,
                                   resume_id=None, sandboxed=True)
     assert executable in argv
     assert expected in " ".join(argv)

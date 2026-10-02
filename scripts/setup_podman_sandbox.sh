@@ -78,7 +78,8 @@ for d in targets/*/; do
     [ -f "$d/config.yaml" ] || continue
     tag=$(.venv/bin/python3 -c 'import sys,yaml;print(yaml.safe_load(open(sys.argv[1]))["image_tag"])' "$d/config.yaml")
     sudo podman build -q -t "$tag" "$d" >/dev/null
-    sudo env VULN_PIPELINE_CONTAINER_ENGINE=podman .venv/bin/python3 \
+    sudo env VULN_PIPELINE_CONTAINER_ENGINE=podman \
+        VULN_PIPELINE_AGENT_BACKEND="${VULN_PIPELINE_AGENT_BACKEND:-claude}" .venv/bin/python3 \
         -c 'import sys; from harness import agent_image; print("  ", agent_image.ensure(sys.argv[1]))' "$tag"
 done
 ok "target + agent images built"

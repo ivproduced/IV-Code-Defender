@@ -7,12 +7,41 @@ terminal result. Keep backend-specific event formats at this boundary.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 from urllib.parse import urlparse
 
 BACKENDS = ("claude", "codex", "gemini", "ollama")
 ENV = "VULN_PIPELINE_AGENT_BACKEND"
+
+
+def _ollama_endpoint() -> tuple[str, str, int | None]:
+    url = os.environ.get("VULN_PIPELINE_OLLAMA_URL", "")
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"invalid VULN_PIPELINE_OLLAMA_URL port: {exc}") from exc
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("ollama requires VULN_PIPELINE_OLLAMA_URL, e.g. http://ollama:11434/v1")
+    host = parsed.hostname.rstrip(".").lower()
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    mapped = getattr(address, "ipv4_mapped", None)
+    # Some resolvers accept short, integer, or hexadecimal IPv4 spellings.
+    # Reject numeric host aliases we cannot safely classify as remote.
+    numeric_alias = address is None and bool(re.fullmatch(
+        r"[0-9.]+|0x[0-9a-f]+|(?:0x[0-9a-f]+\.)+[0-9a-fx.]+", host
+    ))
+    if (host == "localhost" or numeric_alias
+            or (address is not None and (address.is_loopback or address.is_unspecified))
+            or (mapped is not None and (mapped.is_loopback or mapped.is_unspecified))):
+        raise ValueError("ollama URL must name a server reachable from agent containers")
+    return url, parsed.hostname, port
 
 
 def selected(explicit: str | None = None) -> str:
@@ -28,12 +57,7 @@ def auth_env(backend: str) -> dict[str, str] | None:
     if backend == "gemini":
         return {"GEMINI_API_KEY": os.environ["GEMINI_API_KEY"]} if os.environ.get("GEMINI_API_KEY") else None
     if backend == "ollama":
-        url = os.environ.get("VULN_PIPELINE_OLLAMA_URL", "")
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            raise ValueError("ollama requires VULN_PIPELINE_OLLAMA_URL, e.g. http://ollama:11434/v1")
-        if parsed.hostname in ("localhost", "127.0.0.1"):
-            raise ValueError("ollama URL must name a server reachable from agent containers")
+        url, _, _ = _ollama_endpoint()
         return {"CODEX_OSS_BASE_URL": url}
     raise ValueError(f"unsupported backend {backend!r}")
 
@@ -44,13 +68,11 @@ def egress_hosts(backend: str) -> list[str]:
     if backend == "gemini":
         return ["generativelanguage.googleapis.com:443"]
     if backend == "ollama":
-        url = os.environ.get("VULN_PIPELINE_OLLAMA_URL", "")
-        parsed = urlparse(url)
-        if not parsed.hostname:
-            raise ValueError("VULN_PIPELINE_OLLAMA_URL is required")
+        url, host, port = _ollama_endpoint()
         # HTTP model servers can be attached to vp-internal directly. HTTPS
         # endpoints go through the allowlist proxy.
-        return [f"{parsed.hostname}:{parsed.port or 443}"] if parsed.scheme == "https" else []
+        proxy_host = f"[{host}]" if ":" in host else host
+        return [f"{proxy_host}:{port or 443}"] if urlparse(url).scheme == "https" else []
     raise ValueError(f"unsupported backend {backend!r}")
 
 
@@ -72,6 +94,8 @@ def command(container: str, backend: str, *, model: str, max_turns: int,
         return argv + (["--resume", resume_id, "continue"] if resume_id else [])
 
     if backend in ("codex", "ollama"):
+        if tools == []:
+            raise ValueError("Codex CLI cannot enforce a tool-free phase")
         # The OCI container is the security boundary. Codex's own sandbox may
         # be unavailable under gVisor, so use full access only there.
         argv = [*prefix, "codex", "exec"]
@@ -82,7 +106,11 @@ def command(container: str, backend: str, *, model: str, max_turns: int,
             argv += ["--json", "--ignore-user-config", "--skip-git-repo-check",
                      "--model", model]
         argv += ["--config", 'web_search="disabled"',
-                 "--config", "mcp_servers={}"]
+                 "--config", "mcp_servers={}",
+                 "--config", "project_doc_max_bytes=0",
+                 "--config", "project_doc_fallback_filenames=[]"]
+        if system_prompt:
+            argv += ["--config", "developer_instructions=" + json.dumps(system_prompt)]
         if sandboxed:
             argv += ["--dangerously-bypass-approvals-and-sandbox"]
         else:

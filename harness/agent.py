@@ -259,6 +259,10 @@ async def run_agent(
     line is printed so long runs don't look hung.
     """
     backend = agent_backends.selected()
+    if backend in ("codex", "ollama") and tools == []:
+        # Codex CLI has no enforceable per-invocation tool deny. Grade and
+        # judge phases must see only supplied evidence and have no tools.
+        return AgentResult(error=f"{backend} cannot run a tool-free phase through Codex CLI")
     if backend == "gemini":
         # System settings override target-controlled project settings. tools.core
         # is an actual tool allowlist; --allowed-tools would only skip prompts.
@@ -268,15 +272,15 @@ async def run_agent(
         config = {"model": {"maxSessionTurns": max_turns},
                   "tools": {"core": gemini_tools},
                   "mcp": {"allowed": []},
+                  "context": {"fileName": [], "includeDirectoryTree": False},
                   "privacy": {"usageStatisticsEnabled": False}}
         docker_ops.write_file(container, "/tmp/ivcd-gemini-settings.json",
                               json.dumps(config).encode())
+        if system_prompt:
+            docker_ops.write_file(container, "/tmp/ivcd-gemini-system.md",
+                                  system_prompt.encode("utf-8"))
     if backend != "claude":
         constraints = [f"Complete within {max_turns} agent turns."]
-        if tools == []:
-            constraints.append("Do not use any tools; answer from the supplied evidence only.")
-        if system_prompt:
-            constraints.append(system_prompt)
         prompt = "\n\n".join([*constraints, prompt])
     result = AgentResult()
     attempt = 0
@@ -299,6 +303,8 @@ async def run_agent(
                 pos = cmd.index("-w")
                 cmd[pos:pos] = ["-e", "GEMINI_CLI_SYSTEM_SETTINGS_PATH=/tmp/ivcd-gemini-settings.json",
                                 "-e", "GEMINI_CLI_TRUST_WORKSPACE=true"]
+                if system_prompt:
+                    cmd[pos:pos] = ["-e", "GEMINI_SYSTEM_MD=/tmp/ivcd-gemini-system.md"]
             if resume_id:
                 if backend == "claude":
                     prompt_stdin: bytes | None = None

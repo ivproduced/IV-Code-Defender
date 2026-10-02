@@ -83,12 +83,21 @@ def _resolve_auth_env(provider: str | None = None) -> dict[str, str] | None:
 
     Bedrock/Vertex authenticate through scoped cloud credentials. The same
     resolver is used by sandbox setup to derive the provider egress allowlist.
+    Invalid backend configurations raise ValueError so callers can report the
+    specific error without a second missing-credentials message.
     """
+    return _resolve_environment_auth(provider)
+
+
+def _agent_auth_or_error(provider: str | None) -> dict[str, str] | None:
     try:
-        return _resolve_environment_auth(provider)
+        env = _resolve_auth_env(provider)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
+    if env is None:
+        print(_auth_error(), file=sys.stderr)
+    return env
 
 
 def _provider_name(provider: str | None) -> str:
@@ -1068,6 +1077,15 @@ def main() -> int:
     args = parser.parse_args()
     if hasattr(args, "agent_backend"):
         os.environ[agent_backends.ENV] = args.agent_backend
+        if args.agent_backend in ("codex", "ollama") and (
+            args.command in ("report", "patch")
+            or args.command == "run" and (not args.find_only or args.stream)
+        ):
+            print(f"error: {args.agent_backend} cannot run tool-free grade/judge phases "
+                  "through Codex CLI; use run --find-only without --stream "
+                  "or choose claude/gemini",
+                  file=sys.stderr)
+            return 1
 
     if args.command in ("run", "recon", "report", "patch", "llm-regression"):
         if err := sandbox.require(args.dangerously_no_sandbox):
@@ -1104,9 +1122,8 @@ def _cmd_run(args) -> int:
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    agent_env = _resolve_auth_env(getattr(args, "provider", None))
+    agent_env = _agent_auth_or_error(getattr(args, "provider", None))
     if agent_env is None:
-        print(_auth_error(), file=sys.stderr)
         return 1
 
     # Model: required, via --model or env
@@ -1176,9 +1193,8 @@ def _cmd_recon(args) -> int:
     recon_scope = f"p{os.getpid()}"
     _set_container_cleanup_scope(target.name, recon_scope)
 
-    agent_env = _resolve_auth_env(getattr(args, "provider", None))
+    agent_env = _agent_auth_or_error(getattr(args, "provider", None))
     if agent_env is None:
-        print(_auth_error(), file=sys.stderr)
         return 1
 
     if not args.model:
@@ -1363,9 +1379,8 @@ def _cmd_report(args) -> int:
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 1
 
-    agent_env = _resolve_auth_env(getattr(args, "provider", None))
+    agent_env = _agent_auth_or_error(getattr(args, "provider", None))
     if agent_env is None:
-        print(_auth_error(), file=sys.stderr)
         return 1
 
     if not args.model:
@@ -1462,9 +1477,8 @@ def _cmd_patch(args) -> int:
     if not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 1
-    agent_env = _resolve_auth_env(getattr(args, "provider", None))
+    agent_env = _agent_auth_or_error(getattr(args, "provider", None))
     if agent_env is None:
-        print(_auth_error(), file=sys.stderr)
         return 1
     if not args.model:
         print("error: --model required (or set VULN_PIPELINE_MODEL)", file=sys.stderr)

@@ -19,9 +19,9 @@ treating unverified scanner output as a security result.
 | Report and patch stages | Deduplicate verified crashes, assess exploitability, and validate proposed fixes against the original proof of concept. |
 | Sample targets | Start with the canary target, then adapt the pipeline for a supported target or your own codebase. |
 
-The static `/vuln-scan` reviews LLM and agent code against the [OWASP LLM Top
-10 and Agentic Top 10](docs/owasp-ai-coverage.md), and `/triage` verifies
-source-grounded AI findings without discarding prompt injection by default.
+The static [vulnerability scan](.agents/skills/vuln-scan/SKILL.md) reviews
+source code, and [triage](.agents/skills/triage/SKILL.md) checks findings
+against the source before prioritizing them.
 
 ## Choose a workflow
 
@@ -81,7 +81,7 @@ reports appear as crashes are graded under `reports/bug_NN/`.
 
 The agent fleet can also use Codex, Gemini, or a local Ollama-backed open
 model. Select one with `--agent-backend`; see [agent backends](docs/agent-backends.md)
-for authentication and sandbox setup.
+for authentication, sandbox setup, and phase support.
 
 For a real target, begin with a small run to confirm the build, inputs, and
 focus areas before increasing concurrency:

@@ -19,7 +19,7 @@ match it. For example:
 export VULN_PIPELINE_AGENT_BACKEND=codex OPENAI_API_KEY=...
 scripts/setup_sandbox.sh
 bin/vp-sandboxed run canary --agent-backend codex --model <codex-model> \
-  --runs 3 --parallel --stream --max-turns 100
+  --runs 3 --parallel --find-only --max-turns 100
 ```
 
 For Gemini, set `VULN_PIPELINE_AGENT_BACKEND=gemini` and `GEMINI_API_KEY`,
@@ -39,7 +39,7 @@ export VULN_PIPELINE_AGENT_BACKEND=ollama
 export VULN_PIPELINE_OLLAMA_URL=http://ollama:11434/v1
 scripts/setup_sandbox.sh
 bin/vp-sandboxed run canary --agent-backend ollama --model <ollama-model> \
-  --runs 3 --parallel --stream --max-turns 100
+  --runs 3 --parallel --find-only --max-turns 100
 ```
 
 `localhost` refers to the agent container and is rejected. For an HTTPS model
@@ -51,9 +51,18 @@ matters: use a model with reliable tool calls and enough context for the target.
 
 Claude's `--max-turns` and `--tools` flags are enforced by its CLI. Gemini's
 turn budget and tool allowlist are set in system settings. Codex does not
-expose equivalent per-invocation turn and tool allowlists; IVCD passes the
-budget and tool instructions in the prompt, while the container limits files,
-processes, and network access. Check transcripts when calibrating a new model.
+expose equivalent per-invocation turn and tool allowlists. IVCD passes the
+turn budget in the prompt and keeps the fixed pipeline instructions in Codex's
+developer-instruction channel. Gemini receives those instructions through
+`GEMINI_SYSTEM_MD`, which replaces its default system prompt. The container
+limits files, processes, and network access. Target-provided `AGENTS.md` and
+`GEMINI.md` files are not loaded as runtime instructions. Check transcripts
+when calibrating a new model.
+
+Codex and Ollama can run `recon` or `run --find-only`. Full `run`, `report`, and
+`patch` include tool-free grade/judge phases, which IVCD refuses for these
+backends until the runtime can enforce an empty tool set. Use Claude or Gemini
+for those phases.
 
 These adapters have unit tests for argument construction, auth/egress, and
 stream normalization. The full gVisor smoke test still needs a configured

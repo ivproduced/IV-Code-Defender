@@ -95,6 +95,13 @@ def _build(dockerfile: str, tag: str) -> None:
         )
 
 
+def _tag_aliases(tag: str, target_tag: str) -> None:
+    # Older infrastructure callers still use agent_tag(), while setup probes
+    # use latest_tag(). Refresh both after every content-addressed build.
+    for alias in (agent_tag(target_tag), latest_tag(target_tag)):
+        subprocess.run(docker_ops.command("tag", tag, alias), check=True)
+
+
 @functools.lru_cache(maxsize=None)
 def _ensure_for_image(target_tag: str, target_image_id: str) -> str:
     if not _TAG_RE.match(target_tag):
@@ -102,10 +109,7 @@ def _ensure_for_image(target_tag: str, target_image_id: str) -> str:
     tag = _digest_tag(target_tag, target_image_id)
     if not docker_ops.image_exists(tag):
         _build(_agent_dockerfile(target_tag), tag)
-    subprocess.run(
-        docker_ops.command("tag", tag, latest_tag(target_tag)),
-        check=True,
-    )
+    _tag_aliases(tag, target_tag)
     return tag
 
 
@@ -131,5 +135,5 @@ def _ensure_backend_image(target_tag: str, target_image_id: str, backend: str) -
     tag = f"{base}-{backend}:{digest[:16].lower()}-{recipe_digest}"
     if not docker_ops.image_exists(tag):
         _build(recipe, tag)
-    subprocess.run(docker_ops.command("tag", tag, latest_tag(target_tag)), check=True)
+    _tag_aliases(tag, target_tag)
     return tag
