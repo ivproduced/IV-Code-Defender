@@ -3,7 +3,8 @@ name: vuln-scan
 description: >-
   Static source-code vulnerability scan. Reads a target directory (and
   THREAT_MODEL.md if present), spawns parallel review subagents per focus
-  area, and writes VULN-FINDINGS.json + .md for /triage to consume. Read-only
+  area, including the OWASP LLM and Agentic Top 10 when relevant, and writes
+  VULN-FINDINGS.json + .md for /triage to consume. Read-only
   — no building, running, or network. For execution-verified crashes, use
   vuln-pipeline instead. Use when asked to "scan for vulns", "review this code
   for security issues", "find bugs in <dir>", or as the step between
@@ -67,6 +68,13 @@ shell interpreter.
    areas using the pattern `<subsystem> (<function/file>) — <key operations>`.
    Same shape as `harness/prompts/recon_prompt.py`.
 4. If `--focus` was given, use exactly those.
+5. When the target contains LLM or agent code and `--focus` was not given,
+   include its trust boundaries in the focus areas even if THREAT_MODEL.md
+   omitted them: prompt/context assembly, retrieval and vector stores, model
+   output sinks, tools and credentials, memory, agent-to-agent messages,
+   human approvals, and call/resource limits. Fold related surfaces together
+   to stay within 3-10 areas. With `--focus`, apply the OWASP lists below
+   within the requested scope and state which AI surfaces fall outside it.
 
 Tell the user the focus areas you'll scan and the source-file count before
 fanning out.
@@ -119,14 +127,66 @@ WHAT TO LOOK FOR:
   - hardcoded secrets, weak crypto, broken cert validation
   - sensitive data (secrets, PII) in logs or error responses
 
+  OWASP TOP 10 FOR LLM APPLICATIONS (2026) — inspect when the target uses
+  an LLM; these are code-review leads, not automatic findings:
+  - LLM01:2026 Prompt Injection — lower-trust user, retrieved, tool, or
+    multimodal content can redirect model behavior into an unauthorized sink.
+  - LLM02:2026 Sensitive Information Disclosure — secrets or another user's
+    data enter model context, output, logs, or an external provider.
+  - LLM03:2026 Excessive Agency — model-controlled operations have broader
+    permissions or autonomy than the requesting user and task require.
+  - LLM04:2026 Supply Chain — untrusted model, adapter, prompt, plugin, or
+    artifact is fetched or loaded through a production path without integrity
+    or provenance checks, with a concrete route to compromise.
+  - LLM05:2026 Data and Model Poisoning — attacker-writable training,
+    fine-tuning, or retrieval content can persistently alter protected output.
+  - LLM06:2026 Unbounded Consumption — attacker-controlled context growth,
+    retries, recursion, or model/tool loops cause material cost or exhaustion.
+  - LLM07:2026 Misinformation — unverified model claims automatically drive
+    a security-sensitive or materially consequential decision.
+  - LLM08:2026 Hidden Context Exposure — private system/developer context or
+    internal tool state is exposed across a trust boundary.
+  - LLM09:2026 Vector and Embedding Weaknesses — retrieval lacks tenant or
+    document access filters, or attacker-controlled embeddings poison results.
+  - LLM10:2026 Improper Output Handling — model output reaches HTML, SQL,
+    shell, code, or another privileged sink without appropriate validation.
+
+  OWASP TOP 10 FOR AGENTIC APPLICATIONS (2026) — inspect when the target
+  gives an agent tools, memory, delegation, or autonomous actions:
+  - ASI01 Agent Goal Hijack — lower-trust content redirects an agent's goal
+    across a concrete trust boundary.
+  - ASI02 Tool Misuse and Exploitation — agent-selected tools or arguments
+    can exceed task scope or cause unauthorized side effects.
+  - ASI03 Identity and Privilege Abuse — shared credentials, missing user
+    identity propagation, or broad tokens let agents cross authorization.
+  - ASI04 Agentic Supply Chain Vulnerabilities — dynamic tools, MCP servers,
+    skills, or agent configs can be replaced or invoked from untrusted origins.
+  - ASI05 Unexpected Code Execution — model-generated code or commands run
+    with privileges beyond the authorized task.
+  - ASI06 Memory and Context Poisoning — lower-trust input persists in agent
+    memory or context and changes later decisions or tool use.
+  - ASI07 Insecure Inter-Agent Communication — agents accept forged or
+    unvalidated messages, results, or delegated instructions.
+  - ASI08 Cascading Failures — one untrusted or faulty agent result can
+    trigger unchecked downstream actions or recursive delegation.
+  - ASI09 Human-Agent Trust Exploitation — approval code shows model claims
+    instead of the actual action or allows the approved action to change.
+  - ASI10 Rogue Agents — reachable agent code bypasses policy, oversight,
+    termination, or task boundaries through self-directed actions.
+
+  For either list, inspect the source/sink and authorization boundary. A
+  finding needs an attacker-controlled entry, a reachable vulnerable path,
+  and a concrete security impact. User text appearing in a prompt alone is
+  not a finding. Overlapping LLM and ASI labels may describe one finding.
+
   LOW VALUE — note briefly, keep looking:
   - null-pointer deref at small fixed offsets with no attacker control
   - assertion failures / clean error returns (correct handling, not a bug)
 
 DO NOT REPORT (common false positives — skip even if technically present):
   - volumetric DoS / rate-limiting / resource-exhaustion — BUT unbounded
-    recursion, algorithmic-complexity blowup, or ReDoS driven by untrusted
-    input ARE reportable
+    recursion, algorithmic-complexity blowup, ReDoS, or attacker-triggered
+    model/tool loops with material cost ARE reportable
   - memory-safety findings in memory-safe languages outside unsafe/FFI
   - XSS in React/Angular/Vue unless via dangerouslySetInnerHTML,
     bypassSecurityTrustHtml, v-html, or equivalent raw-HTML escape hatch
@@ -148,6 +208,7 @@ OUTPUT — one block per finding, nothing else:
 <file>{relative/path}</file>
 <line>{line_number}</line>
 <category>{heap-buffer-overflow | use-after-free | integer-overflow | sql-injection | command-injection | path-traversal | deserialization | xss | auth-bypass | hardcoded-secret | ...}</category>
+<owasp_refs>{comma-separated LLMnn:2026 / ASInn codes, or none}</owasp_refs>
 <severity>{HIGH | MEDIUM | LOW}</severity>
 <confidence>{0.0-1.0}</confidence>
 <title>{one line}</title>
@@ -168,9 +229,13 @@ single <finding> with category=none and a one-line note of what you covered.
 
 1. Collect `<finding>` blocks from all subagents. Drop `category=none`
    placeholders.
+   Parse `owasp_refs` into a list of recognized, unique codes; use `[]` for
+   non-AI findings.
 2. **Light dedupe** — if two findings cite the same `file:line` with the
-   same category, keep the one with the longer description and note the
-   duplicate id. (Heavy dedupe is `/triage`'s job; don't over-engineer here.)
+   same category, keep the one with the longer description. Before dropping
+   the other, union both `owasp_refs` lists into the retained finding and note
+   the duplicate id. Preserve refs from either finding regardless of which
+   description wins. (Heavy dedupe is `/triage`'s job; don't over-engineer here.)
 3. Assign stable ids `F-001`, `F-002`, ... in (severity desc, file, line)
    order.
 4. Before scoring, write the unscored `VULN-FINDINGS.json` with the schema in
@@ -204,6 +269,10 @@ For EACH finding:
 2. Check for common false-positive patterns: volumetric DoS, memory-safe
    language, test/fixture/doc file, framework auto-escape, env-var vector,
    missing-hardening-only, regex/log injection, or outdated dependency.
+   For OWASP AI findings, check the actual trust boundary, attacker control,
+   downstream action or disclosure, and protections. Do not reject a
+   source-grounded finding just because it involves prompt injection or
+   model output. Do not credit an OWASP label as evidence by itself.
 3. Score 1-10 that the finding is real and actionable:
    - 1-3: likely false positive or noise
    - 4-5: plausible but speculative
@@ -240,6 +309,7 @@ Write **both** files to `<target-dir>/`:
       "file": "relative/path.c",
       "line": 123,
       "category": "heap-buffer-overflow",
+      "owasp_refs": [],
       "severity": "HIGH",
       "confidence": 0.9,
       "title": "...",
@@ -253,11 +323,12 @@ Write **both** files to `<target-dir>/`:
 }
 ```
 
-Findings are sorted by `confidence` desc (then severity, file, line), so
+`owasp_refs` is a list of zero or more OWASP 2026 identifiers. Findings are
+sorted by `confidence` desc (then severity, file, line), so
 the top of the file is the highest-signal material.
 
 **`VULN-FINDINGS.md`** — human-readable: a summary table (id | severity |
-category | file:line | title), then one `### F-NNN` section per finding with
+category | OWASP refs | file:line | title), then one `### F-NNN` section per finding with
 the full description.
 
 ## Step 5 — Hand back

@@ -19,9 +19,9 @@ treating unverified scanner output as a security result.
 | Report and patch stages | Deduplicate verified crashes, assess exploitability, and validate proposed fixes against the original proof of concept. |
 | Sample targets | Start with the canary target, then adapt the pipeline for a supported target or your own codebase. |
 
-The static [vulnerability scan](.agents/skills/vuln-scan/SKILL.md) reviews
-source code, and [triage](.agents/skills/triage/SKILL.md) checks findings
-against the source before prioritizing them.
+The static `/vuln-scan` reviews LLM and agent code against the [OWASP LLM Top
+10 and Agentic Top 10](docs/owasp-ai-coverage.md), and `/triage` verifies
+source-grounded AI findings without discarding prompt injection by default.
 
 ## Choose a workflow
 
