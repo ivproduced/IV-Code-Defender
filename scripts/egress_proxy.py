@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ALLOW = {
     h.strip().lower()
-    for h in (os.environ.get("VP_EGRESS_ALLOW") or "api.anthropic.com:443").split(",")
+    for h in os.environ.get("VP_EGRESS_ALLOW", "api.anthropic.com:443").split(",")
     if h.strip()
 }
 PORT = int(os.environ.get("VP_EGRESS_PORT") or 3128)

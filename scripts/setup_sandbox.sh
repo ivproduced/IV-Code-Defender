@@ -123,7 +123,8 @@ ok "target + agent images built"
 step "Verification"
 # Derive the same agent-image tag agent_image.ensure() produced in step 4
 # (e.g. vuln-pipeline-canary-latest-agent:latest). Hardcoding drifts.
-ATAG=$(.venv/bin/python3 -c 'import sys, yaml; from harness.agent_image import agent_tag; t=agent_tag(yaml.safe_load(open(sys.argv[1]))["image_tag"]); print(t.rsplit(":", 1)[0] + ":latest")' targets/canary/config.yaml)
+ATAG=$(.venv/bin/python3 -c 'import sys, yaml; from harness.agent_image import latest_tag; print(latest_tag(yaml.safe_load(open(sys.argv[1]))["image_tag"]))' targets/canary/config.yaml)
+AGENT_CLI=$(.venv/bin/python3 -c 'from harness.agent_backends import selected; print("codex" if selected() == "ollama" else selected())')
 host_kver=$(uname -r)
 
 # The first container doubles as a cgroup probe. runsc writes cgroup files
@@ -168,9 +169,9 @@ rm -f "$probe_err"
 [ "$guest_kver" != "$host_kver" ] || die "guest kernel == host kernel; gVisor not active"
 ok "gVisor active (guest $guest_kver, host $host_kver)"
 
-docker run --rm --runtime=runsc "$ATAG" claude --version >/dev/null \
-    || die "claude CLI not runnable in agent image"
-ok "claude CLI runs under gVisor"
+docker run --rm --runtime=runsc "$ATAG" "$AGENT_CLI" --version >/dev/null \
+    || die "$AGENT_CLI CLI not runnable in agent image"
+ok "$AGENT_CLI CLI runs under gVisor"
 
 # Probe the first allowlisted host:port (not a hardcoded default) so the check
 # stays meaningful when VP_EGRESS_ALLOW is customized.
@@ -179,10 +180,11 @@ docker run --rm -i --runtime=runsc --network="$NET" \
     -e HTTPS_PROXY="http://${proxy_ip}:3128" "$ATAG" python3 - "$PROBE" <<'PY' || die "egress check failed"
 import urllib.request, socket, sys
 allowed = sys.argv[1]  # host:port — keep the port so the proxy CONNECT matches
-try:
-    urllib.request.urlopen(f"https://{allowed}/", timeout=10).read(1)
-except urllib.error.HTTPError:
-    pass
+if allowed:
+    try:
+        urllib.request.urlopen(f"https://{allowed}/", timeout=10).read(1)
+    except urllib.error.HTTPError:
+        pass
 try:
     urllib.request.urlopen("https://example.com/", timeout=5); sys.exit("example.com reachable")
 except Exception:

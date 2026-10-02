@@ -79,6 +79,10 @@ bin/vp-sandboxed run canary --model <model-id> --runs 3 --parallel --stream
 Results are written to `results/<target>/<timestamp>/`. In streaming mode,
 reports appear as crashes are graded under `reports/bug_NN/`.
 
+The agent fleet can also use Codex, Gemini, or a local Ollama-backed open
+model. Select one with `--agent-backend`; see [agent backends](docs/agent-backends.md)
+for authentication, sandbox setup, and phase support.
+
 For a real target, begin with a small run to confirm the build, inputs, and
 focus areas before increasing concurrency:
 

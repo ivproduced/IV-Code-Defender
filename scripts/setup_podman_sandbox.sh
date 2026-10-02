@@ -78,23 +78,25 @@ for d in targets/*/; do
     [ -f "$d/config.yaml" ] || continue
     tag=$(.venv/bin/python3 -c 'import sys,yaml;print(yaml.safe_load(open(sys.argv[1]))["image_tag"])' "$d/config.yaml")
     sudo podman build -q -t "$tag" "$d" >/dev/null
-    sudo env VULN_PIPELINE_CONTAINER_ENGINE=podman .venv/bin/python3 \
+    sudo env VULN_PIPELINE_CONTAINER_ENGINE=podman \
+        VULN_PIPELINE_AGENT_BACKEND="${VULN_PIPELINE_AGENT_BACKEND:-claude}" .venv/bin/python3 \
         -c 'import sys; from harness import agent_image; print("  ", agent_image.ensure(sys.argv[1]))' "$tag"
 done
 ok "target + agent images built"
 
 step "Verification"
 ATAG=$(.venv/bin/python3 \
-    -c 'import yaml; from harness.agent_image import agent_tag; t=agent_tag(yaml.safe_load(open("targets/canary/config.yaml"))["image_tag"]); print(t.rsplit(":", 1)[0] + ":latest")')
+    -c 'import yaml; from harness.agent_image import latest_tag; print(latest_tag(yaml.safe_load(open("targets/canary/config.yaml"))["image_tag"]))')
+AGENT_CLI=$(.venv/bin/python3 -c 'from harness.agent_backends import selected; print("codex" if selected() == "ollama" else selected())')
 host_kver=$(uname -r)
 guest_kver=$(sudo podman run --rm --runtime=runsc "$ATAG" uname -r) \
     || die "runsc container failed"
 [ "$guest_kver" != "$host_kver" ] || die "guest kernel == host kernel; gVisor not active"
 ok "gVisor active (guest $guest_kver, host $host_kver)"
 
-sudo podman run --rm --runtime=runsc "$ATAG" claude --version >/dev/null \
-    || die "claude CLI not runnable in agent image"
-ok "claude CLI runs under gVisor"
+sudo podman run --rm --runtime=runsc "$ATAG" "$AGENT_CLI" --version >/dev/null \
+    || die "$AGENT_CLI CLI not runnable in agent image"
+ok "$AGENT_CLI CLI runs under gVisor"
 
 PROBE=${ALLOW%%,*}
 sudo podman run --rm -i --runtime=runsc --network="$NET" \
@@ -105,10 +107,11 @@ import sys
 import urllib.request
 
 allowed = sys.argv[1]
-try:
-    urllib.request.urlopen(f"https://{allowed}/", timeout=10).read(1)
-except urllib.error.HTTPError:
-    pass
+if allowed:
+    try:
+        urllib.request.urlopen(f"https://{allowed}/", timeout=10).read(1)
+    except urllib.error.HTTPError:
+        pass
 try:
     urllib.request.urlopen("https://example.com/", timeout=5)
     sys.exit("example.com reachable")

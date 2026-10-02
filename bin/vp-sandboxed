@@ -16,17 +16,22 @@ ENGINE=${VULN_PIPELINE_CONTAINER_ENGINE:-docker}
 # Preserve the fork's --provider / VULN_PIPELINE_PROVIDER interface while
 # making upstream's environment-based egress preflight see the same choice.
 provider=${VULN_PIPELINE_PROVIDER:-}
+backend=${VULN_PIPELINE_AGENT_BACKEND:-claude}
 previous=
 for arg in "$@"; do
     if [ "$previous" = "--provider" ]; then
         provider=$arg
-        break
+    fi
+    if [ "$previous" = "--agent-backend" ]; then
+        backend=$arg
     fi
     case "$arg" in
         --provider=*) provider=${arg#--provider=} ;;
+        --agent-backend=*) backend=${arg#--agent-backend=} ;;
     esac
     previous=$arg
 done
+export VULN_PIPELINE_AGENT_BACKEND="$backend"
 case "$provider" in
     bedrock)
         export CLAUDE_CODE_USE_BEDROCK=1
