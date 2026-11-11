@@ -86,7 +86,8 @@ review the patch's style, but it is only advisory.
 | **Style**     | Would a maintainer accept it?        | LLM judge 0-10; **advisory only, never gates**                      | `t3_style_score`             |
 
 A patch passes when build, reproduce, regress (or no suite), and re-attack are
-all clean.
+all clean. If the re-attack agent fails before finishing, the re-attack tier
+fails and records the agent error in `patch_result.json`.
 
 **Why re-attack?** A patch that compiles and stops the specific PoC is
 generally easy. Published evals of model-generated security patches
@@ -141,7 +142,7 @@ smallest change that fixes the root cause"* reliably trims the diff.
 ```bash
 bin/vp-sandboxed patch <results_dir> --model <m>                   # patch all unique bugs
 bin/vp-sandboxed patch <results_dir> --bug N                       # patch only bug_NN
-bin/vp-sandboxed patch <results_dir> --parallel                    # run patch agents concurrently
+bin/vp-sandboxed patch <results_dir> --parallel --max-parallel 4   # bounded patch concurrency
 bin/vp-sandboxed patch <results_dir> --no-reattack                 # skip the reattack step in the ladder (faster, but weaker)
 bin/vp-sandboxed patch <results_dir> --style                       # run the optional, advisory style judge
 bin/vp-sandboxed patch <results_dir> --max-iterations N            # maximum number of patch loops (default 5)

@@ -3,7 +3,6 @@
 """Back-compat shim: cli._resolve_auth_env / NO_AUTH_MSG re-export harness.auth."""
 import pytest
 
-import harness.auth as auth
 from harness.cli import _resolve_auth_env, NO_AUTH_MSG
 
 

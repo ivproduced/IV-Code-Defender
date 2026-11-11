@@ -12,7 +12,8 @@ CLI flag, and rate-limit math, see [`docs/pipeline.md`](../docs/pipeline.md).
 > ⚠️ **`run`, `recon`, `report`, and `patch` execute target code.** The
 > harness refuses to spawn agents outside its gVisor sandbox. Run
 > `scripts/setup_sandbox.sh` once, then invoke everything through
-> `bin/vp-sandboxed`. Never mount credentials into the agent environment.
+> `bin/vp-sandboxed`. Never mount general credential stores or production
+> credentials; use a dedicated model-invocation-only principal.
 > See [`docs/security.md`](../docs/security.md).
 
 ## Prerequisites

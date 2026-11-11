@@ -160,7 +160,7 @@ class ReportVerdict:
 class RunResult:
     """One end-to-end run's outcome."""
     target: str
-    status: str                     # crash_found, no_crash_found, crash_rejected, agent_failed, build_failed, error
+    status: str                     # crash_found, crash_ungraded, no_crash_found, crash_rejected, agent_failed, build_failed, error
     crash: CrashArtifact | None
     verdict: GraderVerdict | None
     find_transcript: list[dict] = field(default_factory=list)

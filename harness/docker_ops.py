@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 
 def engine() -> str:
@@ -46,12 +48,21 @@ def command(*args: str) -> list[str]:
 
 
 def build(dockerfile_dir: str, tag: str) -> str:
-    """Build a docker image from a directory containing a Dockerfile."""
-    subprocess.run(
-        command("build", "-t", tag, dockerfile_dir),
-        check=True,
-    )
-    return tag
+    """Build an image and return the immutable ID produced by that build.
+
+    ``--iidfile`` binds the returned ID to this invocation even if another
+    process concurrently replaces the mutable output tag.
+    """
+    with tempfile.TemporaryDirectory(prefix="ivcd-build-") as directory:
+        iidfile = Path(directory) / "image-id"
+        subprocess.run(
+            command("build", "--iidfile", str(iidfile), "-t", tag, dockerfile_dir),
+            check=True,
+        )
+        image_id = iidfile.read_text().strip()
+    if not image_id.startswith("sha256:") or len(image_id) != 71:
+        raise RuntimeError(f"container build returned invalid image ID: {image_id!r}")
+    return image_id
 
 
 def run(

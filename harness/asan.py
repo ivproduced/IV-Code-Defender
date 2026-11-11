@@ -103,5 +103,5 @@ def asan_excerpt(crash_output: str, max_frames: int = 10) -> str:
                 break
     if not out:
         # Non-ASAN crash (e.g. glibc assert). First few non-empty lines.
-        out = [l.strip() for l in lines if l.strip()][:3]
+        out = [line.strip() for line in lines if line.strip()][:3]
     return "\n".join(out)

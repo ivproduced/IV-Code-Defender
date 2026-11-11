@@ -68,6 +68,24 @@ def test_run_failure_identifies_selected_engine(monkeypatch):
         docker_ops.run("image:tag", "test-container")
 
 
+def test_build_returns_id_from_this_invocation(monkeypatch):
+    image_id = "sha256:" + "a" * 64
+    command_seen = None
+
+    def run(args, **kwargs):
+        nonlocal command_seen
+        command_seen = args
+        iidfile = args[args.index("--iidfile") + 1]
+        docker_ops.Path(iidfile).write_text(image_id + "\n")
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(docker_ops, "engine", lambda: "docker")
+    monkeypatch.setattr(docker_ops.subprocess, "run", run)
+
+    assert docker_ops.build("/target", "target:latest") == image_id
+    assert command_seen is not None and "--iidfile" in command_seen
+
+
 def test_run_applies_least_privilege_defaults(monkeypatch):
     monkeypatch.setattr(docker_ops, "engine", lambda: "docker")
     commands = []
