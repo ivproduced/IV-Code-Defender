@@ -7,7 +7,8 @@ execution, proof-of-concept extraction, deterministic replay, grading,
 sandboxing, artifact persistence, and the model-provider adapters. It was
 performed against the uncommitted working tree that followed the
 provider-agnostic runtime, verified-replay, immutable-image, and durable-run
-work.
+work. That working tree was subsequently captured at commit `20c9cb7`; findings
+and strengths below describe that snapshot unless explicitly marked resolved.
 
 The review is a point-in-time engineering assessment, not a claim that the
 harness or its targets are free of vulnerabilities.
@@ -28,9 +29,11 @@ harness or its targets are free of vulnerabilities.
 - **Durable private artifacts.** `harness/io_utils.py` provides atomic,
   fsynced, mode-`0600` writes and an exclusive lock for mutable results
   directories.
-- **No-tools enforcement.** An explicit empty tool list is distinct from the
-  default tool set. Backend controls disable tools where possible, and the
-  orchestrator rejects a no-tools agent that emits a tool event.
+- **Backend no-tools controls.** An explicit empty tool list is distinct from
+  the default tool set. Claude and Gemini are configured to disable tools,
+  while Codex/Ollama tool-free invocations are rejected before launch. At the
+  reviewed snapshot, the orchestrator did not reject an unexpected tool event
+  emitted during an otherwise successful no-tools run.
 
 ## Findings
 
@@ -135,15 +138,23 @@ parts of `docs/pipeline.md` already describe the two-of-three allowance. Choose
 one contract, encode it in a named policy constant, and update the find,
 grade, report, and operator documentation together.
 
-### P3 — Use private helpers for transcripts
+### P3 — Reject tool events during no-tools runs
 
-`run_agent()` opens transcript files with the process umask rather than the
-private-file helper. The results root is normally mode `0700`, which reduces
-immediate exposure, but the transcript files themselves are commonly `0644`
-and do not follow the artifact policy.
+Backend flags disable tools where supported, and backends that cannot express
+a tool-free phase are rejected before launch. The orchestrator still accepts a
+successful normalized result even if that result unexpectedly contains a
+`tool_use` event. Treat backend controls as defense in depth: inspect normalized
+assistant messages and fail the logical run immediately if `tools=[]` and any
+tool event appears. Add a regression test using a backend stream that emits a
+tool call followed by a nominally successful result.
 
-Remediation: use `open_private_text()` for JSONL transcripts and add a mode
-assertion to the transcript tests.
+## Resolved in the reviewed snapshot
+
+- Transcript JSONL files use `open_private_text()`, which creates mode-`0600`
+  files and keeps their parent directory private.
+- Codex and Ollama receive system guidance through `developer_instructions`;
+  Gemini receives it through `GEMINI_SYSTEM_MD`. Only the turn-budget reminder
+  is prepended to the user prompt.
 
 ## Maintainability and release hygiene
 
@@ -152,8 +163,6 @@ assertion to the transcript tests.
 - `harness/cli.py` has reached roughly 2,000 lines. Streaming judge/report
   dispatch, recovery, and manifest management form a natural extraction
   boundary.
-- Non-Claude backends prepend system guidance to the user prompt rather than
-  using a backend-native higher-priority instruction channel.
 - Backend agent images use digest-specific runtime tags, but setup probes share
   a mutable `:latest` alias across backends. The alias does not select the
   normal runtime image, but it can confuse concurrent setup or verification.
@@ -169,7 +178,7 @@ assertion to the transcript tests.
 4. Repair proxy backpressure handling.
 5. Move container lifecycle work off the event loop.
 6. Resolve the replay-threshold policy and documentation drift.
-7. Normalize transcript permissions and split orchestration modules.
+7. Split orchestration modules and add an event-level no-tools guard.
 
 ## Validation snapshot
 
