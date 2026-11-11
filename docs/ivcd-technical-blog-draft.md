@@ -52,13 +52,15 @@ with the request or browser steps and observations. The agent submits the
 artifact and explains why it is distinct from findings already recorded for
 the batch.
 
-Verification is a separate stage. The pipeline-owned replay executes the
-submitted command several times in a fresh container without model credentials
-or network access. A separate model-driven grader evaluates the captured
-evidence without tools and cannot override a failed machine criterion. The
-semantic grader uses model credentials and restricted API egress, but it does
-not execute the target; only the credential-free replay container does. The
-T0–T2 patch grader likewise executes target code without model credentials or
+Verification is a separate stage. The pipeline reconstructs or validates the
+replay command against trusted target configuration, then executes the saved
+artifact several times in a fresh container without model credentials or
+network access. A separate model-driven grader evaluates the captured evidence
+without tools and cannot override a failed machine criterion. That semantic
+grader uses model credentials and restricted API egress but does not rerun the
+reproduction command. Because its image is target-derived, target-controlled
+shells, startup files, or libraries remain part of its threat model. The T0–T2
+patch grader likewise executes target code without model credentials or
 network access. Keeping these roles distinct makes the replay artifact central
 evidence without implying that every model-assisted stage is credential-free.
 
@@ -97,8 +99,10 @@ untrusted inputs to target code, and autonomous agents can run commands while
 they investigate. The sandbox limits where those actions can go. It does not
 make arbitrary targets harmless: operators should use an isolated Linux
 environment, narrowly scoped credentials, and the documented launch wrapper.
-The target code executes during discovery and replay, and candidate patches
-need a person to inspect them before adoption.
+Target code executes during discovery and credential-free replay. Sandboxed
+report, patch, and re-attack agents may also execute it while using model
+credentials and restricted provider egress. Candidate patches therefore need
+a person to inspect them before adoption.
 
 ## One workflow, multiple agent runtimes
 
