@@ -93,14 +93,6 @@ def _truncate_tool_results(msg: dict) -> dict:
     """
     if msg.get("type") != "user":
         return msg
-
-
-def _contains_tool_use(msg: dict) -> bool:
-    """Return whether a normalized assistant message attempts any tool call."""
-    return any(
-        isinstance(block, dict) and block.get("type") == "tool_use"
-        for block in msg.get("message", {}).get("content", [])
-    )
     inner = msg.get("message", {})
     content = inner.get("content")
     if not isinstance(content, list):
@@ -118,6 +110,14 @@ def _contains_tool_use(msg: dict) -> bool:
                 ]}
         clipped.append(b)
     return {**msg, "message": {**inner, "content": clipped}}
+
+
+def _contains_tool_use(msg: dict) -> bool:
+    """Return whether a normalized assistant message attempts any tool call."""
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_use"
+        for block in msg.get("message", {}).get("content", [])
+    )
 
 
 def _progress_line(msg: dict, prefix: str) -> None:
