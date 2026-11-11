@@ -40,6 +40,7 @@ import subprocess
 import sys
 import time
 import traceback
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
@@ -80,6 +81,40 @@ NO_AUTH_MSG = (
     "  vertex:    project, region, and GOOGLE_APPLICATION_CREDENTIALS + --provider vertex"
 )
 DEFAULT_MAX_PARALLEL = 4
+
+
+class _PriorityCapacity:
+    """Bound agent workflows while allowing ready reports to jump queued runs."""
+
+    def __init__(self, limit: int):
+        if limit < 1:
+            raise ValueError("parallel limit must be at least 1")
+        self._limit = limit
+        self._active = 0
+        self._priority_waiters = 0
+        self._condition = asyncio.Condition()
+
+    @asynccontextmanager
+    async def slot(self, *, priority: bool = False):
+        async with self._condition:
+            if priority:
+                self._priority_waiters += 1
+            try:
+                await self._condition.wait_for(
+                    lambda: self._active < self._limit
+                    and (priority or self._priority_waiters == 0)
+                )
+                self._active += 1
+            finally:
+                if priority:
+                    self._priority_waiters -= 1
+                    self._condition.notify_all()
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._active -= 1
+                self._condition.notify_all()
 
 
 async def _gather_bounded(coroutines, limit: int):
@@ -596,6 +631,10 @@ async def _stream_dispatch(
         run_idx, bug_id, crash, target, model, agent_env, ctx,
         re_report=(jv.judgment == "DUP_BETTER"),
     )
+    # The enclosing find/grade workflow still owns a capacity slot. Give the
+    # newly ready report task one loop turn to register as a priority waiter
+    # before that slot is released and queued discovery runs can claim it.
+    await asyncio.sleep(0)
 
 
 def _queue_stream_report(
@@ -608,7 +647,7 @@ def _queue_stream_report(
     async def _queued():
         if previous is not None:
             await asyncio.gather(previous, return_exceptions=True)
-        async with ctx["agent_semaphore"]:
+        async with ctx["agent_capacity"].slot(priority=True):
             return await _stream_report(
                 run_idx, bug_id, crash, target, model, agent_env,
                 ctx["reports_root"], re_report=re_report,
@@ -834,6 +873,11 @@ async def _stream_report(
         if current and current.get("from_run") != run_idx:
             _archive_report(out_dir, current)
         _write_report_json(out_dir, candidate)
+    elif prior is not None:
+        # A resume may observe candidate B in report.json after the prior
+        # comparison published it but before completion was checkpointed.
+        # Republish A when the repeated comparison selects the prior report.
+        _write_report_json(out_dir, prior)
     if re_report and prior:
         atomic_write_json(out_dir / "canonical.json", {
             "winner": winner, "reasoning": reasoning,
@@ -996,7 +1040,7 @@ async def _run_all(
     print(color(f"[build] Building {target.image_tag} from {target.dockerfile_dir} ...", "dim"))
     t0 = time.time()
     try:
-        docker_ops.build(target.dockerfile_dir, target.image_tag)
+        target_image_id = docker_ops.build(target.dockerfile_dir, target.image_tag)
     except Exception as e:
         results_root.mkdir(parents=True, exist_ok=True)
         err = RunResult(
@@ -1005,7 +1049,6 @@ async def _run_all(
             error=f"{type(e).__name__}: {e}",
         )
         return [(results_root, err)]
-    target_image_id = docker_ops.image_id(target.image_tag)
     print(f"[build] done in {time.time() - t0:.1f}s ({target_image_id[:23]})")
 
     metadata_error = _record_or_verify_batch_image(
@@ -1074,7 +1117,14 @@ async def _run_all(
                 args.find_only and r.status == "crash_ungraded"
             ):
                 checkpoints[i] = r
-            elif r.status == "crash_ungraded" and r.crash is not None:
+            elif r.crash is not None and (
+                r.status == "crash_ungraded"
+                or (
+                    not args.find_only
+                    and r.status == "agent_failed"
+                    and (r.error or "").startswith("grade agent:")
+                )
+            ):
                 ungraded[i] = r
         if checkpoints:
             print(f"[resume] {len(checkpoints)}/{args.runs} run(s) already terminal "
@@ -1096,7 +1146,7 @@ async def _run_all(
     if args.stream:
         stream_ctx = {
             "lock": asyncio.Lock(),
-            "agent_semaphore": asyncio.Semaphore(args.max_parallel),
+            "agent_capacity": _PriorityCapacity(args.max_parallel),
             "reports_root": results_root / "reports",
             "report_tasks": [],
             "report_tails": {},
@@ -1156,13 +1206,13 @@ async def _run_all(
         n_live = args.runs - len(checkpoints)
         print(f"[dispatch] Launching {n_live} run(s), at most {args.max_parallel} concurrently"
               f"{' (streaming judge→report)' if args.stream else ''} ...\n")
-        semaphore = (
-            stream_ctx["agent_semaphore"] if stream_ctx is not None
-            else asyncio.Semaphore(args.max_parallel)
+        capacity = (
+            stream_ctx["agent_capacity"] if stream_ctx is not None
+            else _PriorityCapacity(args.max_parallel)
         )
 
         async def _bounded_task(i: int):
-            async with semaphore:
+            async with capacity.slot():
                 return await _task(i)
 
         raw = await asyncio.gather(*[_bounded_task(i) for i in range(args.runs)],
@@ -1264,8 +1314,9 @@ def _pin_target_for_existing_batch(
     """Resolve a standalone report/patch command to the batch's exact image."""
     if not docker_ops.image_exists(target.image_tag):
         print(f"[build] Building {target.image_tag} ...")
-        docker_ops.build(target.dockerfile_dir, target.image_tag)
-    current_id = docker_ops.image_id(target.image_tag)
+        current_id = docker_ops.build(target.dockerfile_dir, target.image_tag)
+    else:
+        current_id = docker_ops.image_id(target.image_tag)
     metadata_path = results_root / "batch_metadata.json"
     if metadata_path.exists():
         try:
@@ -1396,7 +1447,10 @@ def main() -> int:
     p_report.add_argument("--parallel", action="store_true",
                           help="Run report agents concurrently")
     p_report.add_argument(
-        "--max-parallel", type=int, default=DEFAULT_MAX_PARALLEL,
+        "--max-parallel", type=int,
+        default=int(os.environ.get(
+            "VULN_PIPELINE_MAX_PARALLEL", str(DEFAULT_MAX_PARALLEL)
+        )),
         help=f"Maximum concurrent report workflows (default {DEFAULT_MAX_PARALLEL})",
     )
     p_report.add_argument("--max-turns", type=int, default=REPORT_MAX_TURNS,
@@ -1433,7 +1487,10 @@ def main() -> int:
     p_patch.add_argument("--parallel", action="store_true",
                          help="Run patch agents concurrently")
     p_patch.add_argument(
-        "--max-parallel", type=int, default=DEFAULT_MAX_PARALLEL,
+        "--max-parallel", type=int,
+        default=int(os.environ.get(
+            "VULN_PIPELINE_MAX_PARALLEL", str(DEFAULT_MAX_PARALLEL)
+        )),
         help=f"Maximum concurrent patch workflows (default {DEFAULT_MAX_PARALLEL})",
     )
     p_patch.add_argument("--max-turns", type=int, default=PATCH_MAX_TURNS,

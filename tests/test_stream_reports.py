@@ -13,6 +13,7 @@ from harness.artifacts import CrashArtifact, GraderVerdict, ReportVerdict, RunRe
 from harness.cli import (
     _append_manifest,
     _pending_stream_reports,
+    _PriorityCapacity,
     _queue_stream_report,
     _repair_judge_log_from_manifest,
     _record_or_verify_batch_image,
@@ -120,8 +121,7 @@ def test_run_resume_requeues_judged_report(tmp_path):
         model="m", accept_dos=False, max_turns=10,
     )
     with (
-        patch("harness.cli.docker_ops.build"),
-        patch("harness.cli.docker_ops.image_id", return_value=image_id),
+        patch("harness.cli.docker_ops.build", return_value=image_id),
         patch("harness.cli.docker_ops.tag", side_effect=lambda _src, dest: dest),
         patch("harness.cli._queue_stream_report") as queue,
     ):
@@ -195,6 +195,74 @@ def test_failed_comparison_preserves_canonical_and_reuses_candidate(tmp_path):
     assert json.loads((bug_dir / "report_run001.json").read_text())["stream_complete"]
 
 
+def test_resume_republishes_prior_report_when_it_wins(tmp_path):
+    reports_root = tmp_path / "reports"
+
+    async def scenario():
+        with patch("harness.cli.run_report", new=AsyncMock(return_value=(
+            VERDICT, "prior report", AgentResult(), 0.01,
+        ))):
+            await _call_report(0, reports_root)
+        with (
+            patch("harness.cli.run_report", new=AsyncMock(return_value=(
+                VERDICT, "candidate report", AgentResult(), 0.01,
+            ))),
+            patch("harness.cli.run_compare", new=AsyncMock(return_value=(
+                "B", "candidate wins", AgentResult(), 0.01,
+            ))),
+        ):
+            await _call_report(1, reports_root, re_report=True)
+
+        bug_dir = reports_root / "bug_00"
+        attempt_path = bug_dir / "report_run001.json"
+        attempt = json.loads(attempt_path.read_text())
+        attempt["stream_complete"] = False
+        attempt_path.write_text(json.dumps(attempt))
+
+        with (
+            patch("harness.cli.run_report", new=AsyncMock()) as generate,
+            patch("harness.cli.run_compare", new=AsyncMock(return_value=(
+                "A", "prior wins on resume", AgentResult(), 0.01,
+            ))),
+        ):
+            await _call_report(1, reports_root, re_report=True)
+            generate.assert_not_awaited()
+
+    asyncio.run(scenario())
+    canonical = json.loads((reports_root / "bug_00" / "report.json").read_text())
+    assert canonical["from_run"] == 0
+    assert canonical["report"] == "prior report"
+
+
+def test_resume_retries_failed_grade_from_saved_crash(tmp_path):
+    image_id = "sha256:" + "a" * 64
+    _record_or_verify_batch_image(tmp_path, TARGET, image_id, is_resume=False)
+    _write_result(tmp_path, RunResult(
+        target="t", status="agent_failed", crash=CRASH, verdict=None,
+        error="grade agent: API unavailable",
+    ))
+    args = SimpleNamespace(
+        engagement_context=None, resume=tmp_path, auto_focus=False,
+        runs=1, find_only=False, stream=False, max_parallel=2,
+        novelty=False, report_max_turns=10, parallel=False,
+        model="m", accept_dos=False, max_turns=10,
+    )
+    retried = RunResult(
+        target="t", status="crash_found", crash=CRASH,
+        verdict=GraderVerdict(True, 1.0, {}, "reproduced"),
+    )
+    with (
+        patch("harness.cli.docker_ops.build", return_value=image_id),
+        patch("harness.cli.docker_ops.tag", side_effect=lambda _src, dest: dest),
+        patch("harness.cli._grade_existing", new=AsyncMock(return_value=retried)) as grade,
+        patch("harness.cli._run_once", new=AsyncMock()) as find,
+    ):
+        pairs = asyncio.run(_run_all(TARGET, args, {}, tmp_path))
+    assert pairs[0][1].status == "crash_found"
+    grade.assert_awaited_once()
+    find.assert_not_awaited()
+
+
 def test_reports_for_same_bug_run_in_judge_order(tmp_path):
     reports_root = tmp_path / "reports"
 
@@ -213,7 +281,7 @@ def test_reports_for_same_bug_run_in_judge_order(tmp_path):
 
         ctx = {
             "report_tails": {}, "report_tasks": [],
-            "agent_semaphore": asyncio.Semaphore(2),
+            "agent_capacity": _PriorityCapacity(2),
             "reports_root": reports_root, "novelty": False,
             "report_max_turns": 10, "system_prompt": None,
             "container_scope": "test",
