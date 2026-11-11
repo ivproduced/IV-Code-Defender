@@ -112,6 +112,14 @@ def _truncate_tool_results(msg: dict) -> dict:
     return {**msg, "message": {**inner, "content": clipped}}
 
 
+def _contains_tool_use(msg: dict) -> bool:
+    """Return whether a normalized assistant message attempts any tool call."""
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_use"
+        for block in msg.get("message", {}).get("content", [])
+    )
+
+
 def _progress_line(msg: dict, prefix: str) -> None:
     """Print a one-line summary of an assistant message to stderr.
     Tool calls show name + key arg; text shows a truncated preview."""
@@ -366,6 +374,11 @@ async def run_agent(
 
                         mtype = msg.get("type")
                         if mtype == "assistant":
+                            if tools == [] and _contains_tool_use(msg):
+                                result.error = "no-tools agent attempted a tool call"
+                                proc.terminate()
+                                await proc.wait()
+                                return result
                             assistant_count += 1
                             tool_call_count += sum(
                                 1 for b in msg.get("message", {}).get("content", [])

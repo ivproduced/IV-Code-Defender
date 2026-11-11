@@ -133,6 +133,8 @@ async def grade_report(
             transcript_path=transcript_path,
             tools=[],
         )
+    if result.error:
+        raise RuntimeError(f"report grader failed: {result.error}")
     first_section = get_profile(profile).report_sections[0]
     return _parse_grader(
         result.find_tagged_message(f"score_{first_section}"),
