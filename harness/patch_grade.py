@@ -297,6 +297,8 @@ async def _style_score(
         result = await run_agent(
             prompt=prompt, container=container, max_turns=5, model=model, tools=[]
         )
+    if result.error:
+        return None
     raw = parse_xml_tag(result.find_tagged_message("style_score"), "style_score")
     try:
         v = float((raw or "").strip())

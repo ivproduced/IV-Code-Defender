@@ -66,6 +66,8 @@ async def run_judge(
             tools=[],
             system_prompt=system_prompt,
         )
+    if result.error:
+        raise RuntimeError(f"judge agent failed: {result.error}")
     elapsed = time.time() - t0
 
     text = result.find_tagged_message("judgment")
@@ -121,6 +123,8 @@ async def run_compare(
             tools=[],
             system_prompt=system_prompt,
         )
+    if result.error:
+        raise RuntimeError(f"compare agent failed: {result.error}")
     elapsed = time.time() - t0
 
     text = result.find_tagged_message("winner")
