@@ -23,10 +23,45 @@ import yaml
 _DIGEST_IMAGE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 _SANDBOX_NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _PROBE_BYTES = bytes(range(256)) * 1024
+_SUPPORTED_VERSION = "0.1.6"
+_PROVIDER_CREDENTIAL_VARS = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+)
 
 
 class OpenShellError(RuntimeError):
     """The OpenShell transport or a required invariant failed."""
+
+
+_PROBE_EXCEPTIONS = (
+    OpenShellError,
+    OSError,
+    ValueError,
+    json.JSONDecodeError,
+    yaml.YAMLError,
+)
+
+
+def _require_supported_version(value: object, component: str) -> None:
+    version = str(value or "")
+    pattern = rf"(?<![\d.]){re.escape(_SUPPORTED_VERSION)}(?![\d.])"
+    if not re.search(pattern, version):
+        raise OpenShellError(
+            f"{component} must be OpenShell {_SUPPORTED_VERSION}, got {version!r}"
+        )
+
+
+def _credential_check_command() -> str:
+    expansions = "".join(f"${{{name}:-}}" for name in _PROVIDER_CREDENTIAL_VARS)
+    return f'test -z "{expansions}"'
 
 
 def _check_replay_inputs(image: str, policy_path: Path) -> None:
@@ -157,10 +192,13 @@ def probe(image: str, policy_path: Path, transport: OpenShellTransport) -> dict:
     """Test transfer, isolation and network denial without a provider."""
     _check_replay_inputs(image, policy_path)
     gateway = transport.status()
+    openshell_version = transport.version()
+    _require_supported_version(openshell_version, "CLI")
+    _require_supported_version(gateway.get("version"), "gateway")
     suffix = secrets.token_hex(4)
     first, fresh = f"ivcd-probe-{suffix}", f"ivcd-fresh-{suffix}"
     report = {
-        "openshell_version": transport.version(),
+        "openshell_version": openshell_version,
         "gateway_version": gateway.get("version"),
         "image": image,
         "qualified_for_pipeline": False,
@@ -188,18 +226,31 @@ def probe(image: str, policy_path: Path, transport: OpenShellTransport) -> dict:
             )
             credential_check = transport.exec(
                 first,
-                ["/bin/bash", "-c", 'test -z "${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}${GEMINI_API_KEY:-}"'],
+                [
+                    "/bin/bash",
+                    "-c",
+                    _credential_check_command(),
+                ],
             )
             report["checks"]["provider_credentials_absent"] = credential_check.returncode == 0
             transport.create_replay(fresh, image, policy_path)
             clean = transport.exec(fresh, ["/usr/bin/test", "!", "-e", "/sandbox/probe.bin"])
             report["checks"]["fresh_sandbox_isolated"] = clean.returncode == 0
+        except _PROBE_EXCEPTIONS as exc:
+            primary_error = exc
+        else:
+            primary_error = None
         finally:
             for name in (fresh, first):
                 try:
                     transport.delete(name)
-                except OpenShellError as exc:
-                    report.setdefault("cleanup_errors", []).append(str(exc))
+                except _PROBE_EXCEPTIONS as exc:
+                    report.setdefault("cleanup_errors", []).append(f"{name}: {exc}")
+        if primary_error is not None:
+            detail = str(primary_error)
+            if report.get("cleanup_errors"):
+                detail += "; cleanup errors: " + "; ".join(report["cleanup_errors"])
+            raise OpenShellError(detail) from primary_error
     report["transport_passed"] = all(report["checks"].values()) and not report.get("cleanup_errors")
     return report
 
@@ -214,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = probe(args.image, args.policy, OpenShellTransport(args.binary, args.gateway))
-    except (OpenShellError, OSError, ValueError, json.JSONDecodeError) as exc:
+    except _PROBE_EXCEPTIONS as exc:
         result = {"transport_passed": False, "qualified_for_pipeline": False, "error": str(exc)}
     output = json.dumps(result, indent=2, sort_keys=True)
     if args.output:
