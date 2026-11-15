@@ -13,15 +13,26 @@ from __future__ import annotations
 import functools
 import hashlib
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
+from pathlib import Path
 
 from . import docker_ops
 
 CLAUDE_CODE_VERSION = "2.1.144"  # bump alongside the dev-env CLI pin
 CODEX_VERSION = "0.153.1"
 GEMINI_VERSION = "0.61.0"
+# Base images are pinned by manifest-list digest (the tag is kept for humans).
+# Agent CLIs install from a committed package-lock.json (harness/locks/<cli>/)
+# via `npm ci`, so every transitive tarball is integrity-checked (sha512).
+NODE_IMAGE = ("node:22-bookworm-slim@sha256:"
+              "e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee")
+ALPINE_IMAGE = ("alpine:3.21@sha256:"
+                "bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab")
+_LOCK_DIR = Path(__file__).parent / "locks"
+_CLI_BIN = {"claude": "claude", "codex": "codex", "gemini": "gemini"}
 _TAG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/:-]*$")
 
 
@@ -35,36 +46,61 @@ def agent_tag(target_tag: str) -> str:
     return f"{target_tag.replace(':', '-')}-agent:{CLAUDE_CODE_VERSION}"
 
 
+def _lock_name(backend: str) -> str:
+    return "codex" if backend == "ollama" else backend
+
+
+def _lock_digest(backend: str) -> str:
+    """Hash of the lock inputs, embedded in the Dockerfile so changing a lock
+    changes the recipe digest and therefore the image tag."""
+    d = _LOCK_DIR / _lock_name(backend)
+    h = hashlib.sha256()
+    for name in ("package.json", "package-lock.json"):
+        h.update((d / name).read_bytes())
+    return h.hexdigest()
+
+
+def _cli_install(backend: str) -> list[str]:
+    name = _lock_name(backend)
+    binary = _CLI_BIN[name]
+    return [
+        f"COPY locks/{name}/package.json locks/{name}/package-lock.json /opt/ivcd-cli/",
+        "RUN cd /opt/ivcd-cli && npm ci --no-audit --no-fund && \\",
+        f"    ln -sf /opt/ivcd-cli/node_modules/.bin/{binary} /usr/local/bin/{binary}",
+        f"# lock sha256: {_lock_digest(backend)}",
+    ]
+
+
 def _agent_dockerfile(base_image: str) -> str:
-    return textwrap.dedent(f"""\
-        FROM {base_image}
-        USER root
-        RUN apt-get update && \\
-            apt-get install -y --no-install-recommends nodejs npm ca-certificates xxd gdb && \\
-            rm -rf /var/lib/apt/lists/* && \\
-            npm install -g @anthropic-ai/claude-code@{CLAUDE_CODE_VERSION}
-        WORKDIR /work
-    """)
+    return "\n".join([
+        f"FROM {base_image}",
+        "USER root",
+        "RUN apt-get update && \\",
+        "    apt-get install -y --no-install-recommends nodejs npm ca-certificates xxd gdb && \\",
+        "    rm -rf /var/lib/apt/lists/*",
+        *_cli_install("claude"),
+        "WORKDIR /work",
+        "",
+    ])
 
 
 def _backend_dockerfile(base_image: str, backend: str) -> str:
     if backend == "claude":
         return _agent_dockerfile(base_image)
-    package = (f"@openai/codex@{CODEX_VERSION}" if backend in ("codex", "ollama")
-               else f"@google/gemini-cli@{GEMINI_VERSION}")
-    return textwrap.dedent(f"""\
-        FROM node:22-bookworm-slim AS node
-        FROM {base_image}
-        USER root
-        RUN apt-get update && \\
-            apt-get install -y --no-install-recommends ca-certificates xxd gdb && \\
-            rm -rf /var/lib/apt/lists/*
-        COPY --from=node /usr/local/bin/node /usr/local/bin/node
-        COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
-        RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \\
-            npm install -g {package}
-        WORKDIR /work
-    """)
+    return "\n".join([
+        f"FROM {NODE_IMAGE} AS node",
+        f"FROM {base_image}",
+        "USER root",
+        "RUN apt-get update && \\",
+        "    apt-get install -y --no-install-recommends ca-certificates xxd gdb && \\",
+        "    rm -rf /var/lib/apt/lists/*",
+        "COPY --from=node /usr/local/bin/node /usr/local/bin/node",
+        "COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm",
+        "RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm",
+        *_cli_install(backend),
+        "WORKDIR /work",
+        "",
+    ])
 
 
 def _base_image_tag(target_image_id: str) -> str:
@@ -92,6 +128,7 @@ def _build(dockerfile: str, tag: str) -> None:
     with tempfile.TemporaryDirectory() as ctx:
         with open(f"{ctx}/Dockerfile", "w") as f:
             f.write(dockerfile)
+        shutil.copytree(_LOCK_DIR, f"{ctx}/locks")
         subprocess.run(
             docker_ops.command("build", "-q", "-t", tag, ctx),
             check=True,

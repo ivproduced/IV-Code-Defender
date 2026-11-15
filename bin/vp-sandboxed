@@ -58,7 +58,7 @@ case "$ENGINE" in
             || { echo "error: Podman sandboxing requires rootful Podman; use sudo -E $0 ..." >&2; exit 1; }
         [ -z "${CONTAINER_HOST:-}${CONTAINER_CONNECTION:-}" ] \
             || { echo "error: Podman sandboxing requires the local service; unset CONTAINER_HOST and CONTAINER_CONNECTION" >&2; exit 1; }
-        podman run --rm --runtime="$RUNTIME" alpine:3.21 true \
+        podman run --rm --runtime="$RUNTIME" alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab true \
             || { echo "error: runtime '$RUNTIME' unavailable; run scripts/setup_podman_sandbox.sh" >&2; exit 1; }
         ;;
     *)  echo "error: VULN_PIPELINE_CONTAINER_ENGINE must be docker or podman" >&2; exit 1 ;;
@@ -77,6 +77,17 @@ fi
 export VULN_PIPELINE_AGENT_RUNTIME="$RUNTIME"
 export VULN_PIPELINE_AGENT_NETWORK="$NET"
 export VULN_PIPELINE_EGRESS_PROXY="http://${proxy_ip}:3128"
+
+# Credential gateway: when the proxy sidecar was started with one, agent
+# containers get a placeholder token and talk to it instead of the API.
+if "$ENGINE" inspect "$PROXY_NAME" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+        | grep -q '^VP_GATEWAY_UPSTREAM=.'; then
+    export VULN_PIPELINE_CREDENTIAL_GATEWAY="http://${proxy_ip}:8080"
+elif [ "$backend" = "claude" ] && [ -z "${CLAUDE_CODE_USE_BEDROCK:-}${CLAUDE_CODE_USE_VERTEX:-}" ] \
+        && [ -n "${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    echo "warning: credential gateway not active; the model key will be placed in agent containers." >&2
+    echo "         Re-run scripts/setup_sandbox.sh to enable it (docs/security.md)." >&2
+fi
 
 PROXY_ALLOW=$("$ENGINE" inspect "$PROXY_NAME" --format \
     '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^VP_EGRESS_ALLOW=//p')
