@@ -62,7 +62,8 @@ from .io_utils import (
     ResultsLockError,
 )
 from .judge import run_judge, run_compare
-from .profiles import is_web
+from .profiles import is_pyexec, is_web
+from . import pyexec
 from .novelty import upstream_log, crash_file_from_frame, NOVELTY_NOT_CHECKED
 from .patch import run_patch, PATCH_MAX_TURNS, DEFAULT_MAX_ITERATIONS
 from .recon import run_recon, RECON_MAX_TURNS
@@ -338,6 +339,8 @@ def _write_result(out_dir: Path, result: RunResult) -> None:
     # consumers can cross-check (the agent tag is free-text and fragments).
     if result.crash:
         if is_web(result.crash.profile):
+            slim["crash"]["evidence_excerpt"] = _evidence_excerpt(result.crash)
+        elif is_pyexec(result.crash.profile):
             slim["crash"]["evidence_excerpt"] = _evidence_excerpt(result.crash)
         else:
             slim["crash"]["reason"] = crash_reason(result.crash.crash_output)
@@ -797,11 +800,16 @@ async def _stream_report(
         return candidate
 
     if candidate is None:
-        frame = top_frame(crash.crash_output) or ""
-        crash_file = crash_file_from_frame(frame)
+        if is_pyexec(target.profile):
+            sig = pyexec.lenient_signature(crash.crash_output)
+            frame = " ".join(sig) if sig else ""
+            crash_file = None
+        else:
+            frame = top_frame(crash.crash_output) or ""
+            crash_file = crash_file_from_frame(frame)
         log = None
         # Web replay evidence has no trustworthy source-file attribution yet.
-        if novelty and not is_web(target.profile):
+        if novelty and not is_web(target.profile) and not is_pyexec(target.profile):
             print(f"[report:{run_idx}→bug_{bug_id:02d}] novelty: fetching upstream log for {crash_file or '?'} ...")
             log = upstream_log(target.github_url, target.commit,
                                crash_file or "", max_bytes=2000)
@@ -935,6 +943,9 @@ def _assigned_focus(i: int, focus_areas: list[str]) -> str | None:
 
 
 def _evidence_excerpt(crash: CrashArtifact) -> str:
+    if is_pyexec(crash.profile):
+        # Agent-claimed events, token stripped; display/dedup context only.
+        return pyexec.excerpt(crash.crash_output)
     if not is_web(crash.profile):
         return asan_excerpt(crash.crash_output)
     evidence = crash.evidence_bundle or {}
@@ -1776,11 +1787,27 @@ def _cmd_recon(args) -> int:
     return 0
 
 
+def _results_use_pyexec(root: Path) -> bool:
+    for path in root.rglob("result.json"):
+        try:
+            crash = json.loads(path.read_text()).get("crash") or {}
+        except (OSError, json.JSONDecodeError):
+            continue
+        if crash.get("profile") == "python_exec":
+            return True
+    return False
+
+
 def _cmd_dedup(args) -> int:
     from .dedup import format_report
     root: Path = args.results_dir
     if not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
+        return 1
+    if _results_use_pyexec(root):
+        print("error: dedup does not support python_exec results in this release "
+              "(signature = kind/sink/function is judged by --stream's judge agent)",
+              file=sys.stderr)
         return 1
     groups = dedup(root)
     print(format_report(groups, root), end="")
@@ -1959,6 +1986,10 @@ def _cmd_report(args) -> int:
     except Exception as e:
         print(f"error: could not load target config for batch: {e}", file=sys.stderr)
         return 1
+    if is_pyexec(target.profile):
+        print("error: standalone report is not supported for python_exec in this "
+              "release; use `run --stream`", file=sys.stderr)
+        return 1
     container_scope = _container_scope(root)
     _set_container_cleanup_scope(target.name, container_scope)
 
@@ -2060,6 +2091,10 @@ def _cmd_patch(args) -> int:
     first_path = next(p for _i, _s, ents in items for p, _st, _r in ents)
     target_name = json.loads(first_path.read_text())["target"]
     target = TargetConfig.load(args.targets_dir / target_name)
+    if is_pyexec(target.profile):
+        print("error: patching is not supported for python_exec in this release",
+              file=sys.stderr)
+        return 1
     if not target.build_command:
         print(f"error: target {target.name!r} has no build_command in config.yaml — "
               f"the patch grader needs an in-container rebuild step", file=sys.stderr)

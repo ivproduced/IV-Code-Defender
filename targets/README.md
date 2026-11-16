@@ -44,6 +44,46 @@ self-contained command, structured HTTP `requests`/`responses` or browser
 `steps`/`observations`, and concrete security impact. That manifest—not scanner output—crosses into the
 pristine grader, which replays it three times and rejects test-only paths.
 
+#### `python_exec` (Python, runtime-monitor verified)
+
+For Python code where a finding is a dangerous *operation* rather than a
+sanitizer abort. Same contract as `cpp_asan`: only PoC bytes cross from find to
+grade, and the grader builds the replay command from config
+(`<binary_path> <poc_path>`). The grader is code, not a model.
+
+```yaml
+profile: python_exec
+binary_path: /opt/vp/entry.py      # replay entry script; MUST be outside source_root
+source_root: /work/app             # only frames under here count as "target code"
+allowed_roots: [/work/app/data]    # paths target code may open (required)
+allowed_hosts: []                  # hosts target code may contact
+attack_surface: |                  # required: the only inputs a PoC may use
+  ...
+```
+
+The image must ship the monitor at `/opt/vp/monitor/sitecustomize.py` (copy
+`harness/monitor/sitecustomize.py`; a test enforces the `pycanary` copy is
+identical) and the entry script outside `source_root`. The grader replays three
+times with `PYTHONPATH=/opt/vp/monitor` and per-replay random
+`IVCD_EVENT_TOKEN`, `IVCD_SOURCE_ROOT`, `IVCD_ALLOWED_ROOTS`,
+`IVCD_ALLOWED_HOSTS`; the monitor prints `<token> IVCD-EVENT <json>` to stderr
+for dangerous operations (os.system, subprocess, exec, spawn, open, socket
+connect, pickle.find_class, exec/compile) performed from `source_root`. A
+finding passes only if one proof holds 3/3 with a fresh token each time:
+
+| `crash_type` | Proof |
+|---|---|
+| `exec` | command/exec event whose executable or command is `ivcd-proof` |
+| `path_escape` | `open` event resolving outside `allowed_roots` |
+| `secret_read` | the per-replay canary, planted by the grader at `/tmp/ivcd-canary.txt` (outside the allowed roots), appears in the replay output |
+
+Lines without the current token are ignored (a target cannot forge events
+without the token), a missing monitor handshake or unparseable event fails the
+replay, and the token/canary must not appear in the PoC bytes. `allowed_roots`
+may not cover `/` or the grader-owned `/tmp/ivcd-canary.txt` and `/tmp/poc.bin`.
+Patching and standalone `dedup`/`report` are not supported for this profile in
+this release (`run --stream` works). See `targets/pycanary` for a complete example.
+
 Optional fields:
 
 ```yaml

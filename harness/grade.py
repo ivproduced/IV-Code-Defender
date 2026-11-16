@@ -24,8 +24,10 @@ from .artifacts import CrashArtifact, GraderVerdict
 from .asan import crash_reason, top_frame
 from .config import TargetConfig
 from .io_utils import atomic_write_bytes
-from .profiles import (CANARY_ENV, build_grade_prompt, is_web, load_web_manifest,
-                       new_canary, trusted_reproduction_command)
+from . import pyexec
+from .profiles import (CANARY_ENV, build_grade_prompt, is_pyexec, is_web,
+                       load_web_manifest, new_canary, new_event_token,
+                       trusted_reproduction_command)
 from .prompts.untrusted import make_nonce, untrusted_block
 
 
@@ -43,7 +45,8 @@ class ReplayObservation:
     stdout: str
     stderr: str
     timed_out: bool = False
-    canary: str = ""  # web profiles: the secret planted for this replay
+    canary: str = ""  # web/python_exec: the secret planted for this replay
+    token: str = ""   # python_exec: this replay's monitor event token
 
     @property
     def output(self) -> str:
@@ -88,7 +91,9 @@ async def run_grade(
     ) as replay_container:
         docker_ops.write_file(replay_container, workspace_artifact, crash.poc_bytes)
         observations = await _collect_replay(
-            replay_container, adapted_cmd, web=is_web(target.profile)
+            replay_container, adapted_cmd, web=is_web(target.profile),
+            pyexec_target=target if is_pyexec(target.profile) else None,
+            artifact_path=workspace_artifact,
         )
 
     machine_criteria, machine_evidence = _machine_verdict(
@@ -155,24 +160,48 @@ async def run_grade(
         return verdict, result, elapsed
 
 
+def _pyexec_env(target: TargetConfig, token: str) -> dict[str, str]:
+    """Monitor environment for one python_exec replay (token is per replay)."""
+    return {
+        "IVCD_EVENT_TOKEN": token,
+        "IVCD_SOURCE_ROOT": target.source_root,
+        "IVCD_ALLOWED_ROOTS": ":".join(target.allowed_roots),
+        "IVCD_ALLOWED_HOSTS": ",".join(target.allowed_hosts),
+        "PYTHONPATH": pyexec.MONITOR_DIR,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
 async def _collect_replay(
-    container: str, command: str, web: bool = False
+    container: str, command: str, web: bool = False,
+    pyexec_target: TargetConfig | None = None,
+    artifact_path: str = "/tmp/poc.bin",
 ) -> list[ReplayObservation]:
     observations: list[ReplayObservation] = []
     for _ in range(REPLAY_RUNS):
-        canary = new_canary() if web else ""
+        canary = new_canary() if (web or pyexec_target) else ""
+        token = new_event_token() if pyexec_target else ""
+        env = {CANARY_ENV: canary} if web else None
+        if pyexec_target:
+            # The canary lives in a file outside the allowed roots; only a
+            # real read by target code can surface it. It is not in the env.
+            await asyncio.to_thread(
+                docker_ops.write_file, container, pyexec.CANARY_PATH, canary.encode()
+            )
+            env = _pyexec_env(pyexec_target, token)
         try:
             rc, stdout, stderr = await asyncio.to_thread(
                 docker_ops.exec_sh,
                 container,
                 command,
                 timeout=REPLAY_TIMEOUT_S,
-                env={CANARY_ENV: canary} if canary else None,
+                env=env,
             )
-            observations.append(ReplayObservation(rc, stdout, stderr, canary=canary))
+            observations.append(
+                ReplayObservation(rc, stdout, stderr, canary=canary, token=token))
         except subprocess.TimeoutExpired:
             observations.append(
-                ReplayObservation(None, "", "", timed_out=True, canary=canary)
+                ReplayObservation(None, "", "", timed_out=True, canary=canary, token=token)
             )
     return observations
 
@@ -197,6 +226,7 @@ def _machine_verdict(
         "criterion_1": bool(crash.poc_bytes),
     }
     outputs = [item.output for item in observations]
+    extra_lines: list[str] = []
     oom_markers = (
         tuple(marker for marker in _OOM_MARKERS if marker != "allocation-size-too-big")
         if accept_dos else _OOM_MARKERS
@@ -235,6 +265,26 @@ def _machine_verdict(
             "criterion_4": True,
             "criterion_5": True,
         })
+    elif is_pyexec(target.profile):
+        proofs = _pyexec_proofs(crash, target, observations)
+        parsed = [pyexec.parse_events(o.stderr, o.token) for o in observations]
+        distinct = len({p.signature for p in proofs}) == 1
+        secrets_in_poc = any(
+            v and v.encode() in crash.poc_bytes
+            for o in observations for v in (o.token, o.canary)
+        )
+        criteria["criterion_1"] = bool(crash.poc_bytes) and not secrets_in_poc \
+            and crash.crash_type in pyexec.KINDS
+        criteria.update({
+            "criterion_2": len(observations) == REPLAY_RUNS and all(
+                p.ready and not p.malformed for p in parsed),
+            "criterion_3": no_resource_failure and all(p.passed for p in proofs),
+            "criterion_4": all(p.passed and p.signature and p.signature[2] != "-"
+                               for p in proofs),
+            "criterion_5": all(p.passed for p in proofs) and distinct,
+        })
+        extra_lines = [f"[proof {i}] {'PASS' if p.passed else 'FAIL'}: {p.reason}"
+                       for i, p in enumerate(proofs, 1)]
     else:
         signatures = [_crash_signature(output) for output in outputs]
         claimed_signature = _crash_signature(crash.crash_output)
@@ -256,7 +306,7 @@ def _machine_verdict(
             and (claimed_signature is None or landed[0] == claimed_signature),
         })
 
-    lines = []
+    lines = list(extra_lines)
     for index, item in enumerate(observations, 1):
         clipped = item.output[-4000:]
         lines.append(
@@ -268,6 +318,30 @@ def _machine_verdict(
                     for key, value in sorted(criteria.items()))
     )
     return criteria, "\n\n".join(lines)
+
+
+def _pyexec_proofs(
+    crash: CrashArtifact, target: TargetConfig, observations: list[ReplayObservation]
+) -> list[pyexec.ReplayProof]:
+    """Apply the proof rules to each replay. Timeouts and missing observations
+    fail closed."""
+    proofs = []
+    for item in observations:
+        if item.timed_out:
+            proofs.append(pyexec.ReplayProof(False, "replay timed out"))
+            continue
+        proofs.append(pyexec.evaluate_replay(
+            crash.crash_type,
+            pyexec.parse_events(item.stderr, item.token),
+            output=item.output,
+            canary=item.canary,
+            allowed_roots=target.allowed_roots,
+            source_root=target.source_root,
+            artifact_path="/tmp/poc.bin",
+        ))
+    while len(proofs) < REPLAY_RUNS:
+        proofs.append(pyexec.ReplayProof(False, "missing replay"))
+    return proofs
 
 
 def _crash_signature(output: str) -> tuple[str, str] | None:
