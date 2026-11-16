@@ -1,0 +1,8 @@
+{
+  "name": "ivcd-agent-cli-gemini",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@google/gemini-cli": "0.61.0"
+  }
+}

@@ -78,7 +78,8 @@ def egress_hosts(backend: str) -> list[str]:
 
 def command(container: str, backend: str, *, model: str, max_turns: int,
             tools: list[str] | None, system_prompt: str | None,
-            resume_id: str | None, sandboxed: bool) -> list[str]:
+            resume_id: str | None, sandboxed: bool,
+            max_budget_usd: float | None = None) -> list[str]:
     """Build the in-container command. The caller supplies the prompt on stdin."""
     from . import docker_ops, sandbox
     from .agent import DEFAULT_TOOLS, build_claude_argv
@@ -90,7 +91,8 @@ def command(container: str, backend: str, *, model: str, max_turns: int,
                   "-e", "IS_SANDBOX=1", "-w", "/work", "--", container, "claude"]
         argv = build_claude_argv(prefix, model=model, max_turns=max_turns,
                                  tools=tools, permission_mode=sandbox.permission_mode(),
-                                 system_prompt=system_prompt)
+                                 system_prompt=system_prompt,
+                                 max_budget_usd=max_budget_usd)
         return argv + (["--resume", resume_id, "continue"] if resume_id else [])
 
     if backend in ("codex", "ollama"):

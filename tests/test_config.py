@@ -62,7 +62,6 @@ def test_web_profile_requires_safe_replay_contract(tmp_path):
         {"profile": "unknown"},
         {"profile": "python_web", "replay_command": "/work/src/replay", "detection_signal": "FOUND"},
         {"profile": "node_web", "replay_command": "/work/replay; id", "detection_signal": "FOUND"},
-        {"profile": "react_web", "replay_command": "/work/replay"},
         {"profile": "python_web", "replay_command": "/work/replay", "detection_signal": "x" * 257},
     ],
 )

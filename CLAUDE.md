@@ -23,8 +23,12 @@ fast smoke test). The rest of this file is the pipeline operator guide.
 # vuln-pipeline
 
 Execution-verified vulnerability discovery for C/C++ targets. A find-agent reads
-source, crafts inputs, runs an ASAN-instrumented binary until it lands a 3/3
-reproducing crash. A grade-agent in a fresh container verifies it. Output is a
+source, crafts inputs, and runs an ASAN-instrumented binary until it lands a
+reproducing crash (the find prompt asks for 3/3 on the agent's side). A
+pipeline-owned oracle then replays it three times in a fresh, credential-free,
+networkless container and accepts ≥2/3 consistent crashes (tolerates
+nondeterminism; `REPLAY_MIN_CRASHES` in `grade.py`); a no-tools grade-agent
+handles the semantic criteria only. Output is a
 crashing input file, not prose.
 
 ## When the user asks you to run it
@@ -55,7 +59,8 @@ Each pipeline phase is a standalone subcommand:
 ```bash
 vuln-pipeline recon <target> --model <model>        # propose focus_areas (YAML → stdout)
 vuln-pipeline run <target> --model <model>          # find + grade, one run
-vuln-pipeline run <target> --runs N --parallel      # N concurrent finds, round-robin over focus_areas
+vuln-pipeline run <target> --runs N --parallel      # bounded concurrent finds, round-robin over focus_areas
+vuln-pipeline run <target> --runs N --parallel --max-parallel 4
 vuln-pipeline run <target> --auto-focus             # recon first, use its partition
 vuln-pipeline run <target> --stream                 # judge + report stream in as grades land (recommended)
 vuln-pipeline run <target> --find-only              # skip grade (prompt iteration)
@@ -223,6 +228,72 @@ Agent-spawning subcommands refuse to start outside the sandbox unless
 **Agent tool set is fixed:** find/grade/report agents get `Read`, `Write`,
 `Bash`. Judge, compare, and report-grader agents get no tools — everything in
 the prompt, one short call each. No MCP, no web access.
+
+## Limits, secrets and audit trail
+
+**Host-side bounds on untrusted containers.** `docker_ops.read_file` reads only
+regular files (`test -f`), ≤8 MiB, 30s timeout (rejects `/dev/zero`, FIFOs,
+oversized PoCs). `docker_ops.exec_sh` caps stdout/stderr at 4 MiB each and, on
+timeout, SIGKILLs the container's processes (`kill_all`) — killing the host-side
+`docker exec` alone leaves the command running. `run_agent` has a wall-clock
+deadline (default 8h incl. resumes; `--agent-deadline-s`) and drains stderr
+concurrently with stdout. The egress proxy relays over blocking sockets with
+timeouts (non-blocking `sendall` dropped large streams).
+
+**Spend ceilings.** Turns alone do not bound a batch. `--max-batch-usd`,
+`--max-batch-tokens`, `--max-agent-usd` (env `VULN_PIPELINE_MAX_BATCH_USD`,
+`..._MAX_BATCH_TOKENS`, `..._MAX_AGENT_USD`) feed `harness/budget.py`, a
+process-global ledger. Dollar ceilings are enforced live by reservation: each
+CLI launch gets `--max-budget-usd min(per-agent cap, ceiling − spent − in-flight)`,
+so `--max-batch-usd` requires `--max-agent-usd`; token ceilings count assistant
+usage as it streams. Both are Claude-backend only (other backends are refused
+rather than silently unenforced). Results with
+subtype `error_max_turns` / `error_max_budget_usd` are terminal (recorded in
+`AgentResult.stop_reason`, never resumed; running out of budget also sets
+`error` so re-attack/grading cannot read it as a clean run); auth/credit errors
+are non-retryable. The deadline covers prompt delivery, output and process exit;
+error stops kill the in-container CLI. Other `is_error` results still go through the resume loop.
+
+**Credential gateway.** `scripts/setup_sandbox.sh` starts the proxy sidecar with
+the Anthropic key/OAuth token (Claude backend, API-key/OAuth auth only);
+`bin/vp-sandboxed` detects it and sets `VULN_PIPELINE_CREDENTIAL_GATEWAY` and
+`VULN_PIPELINE_GATEWAY_TOKEN` (a random per-setup client secret the gateway
+requires, since the sidecar also listens on the default bridge).
+`sandbox.container_env` then gives containers that client token and
+`ANTHROPIC_BASE_URL=http://<proxy>:8080`; the gateway injects the real
+credential, forwards only `/v1/messages` and `/v1/models`, and the key never
+enters a container that runs target code. Bedrock/Vertex/Codex/Gemini
+credentials still pass through (residual risk, `docs/security.md`). Opt out:
+`VP_CREDENTIAL_GATEWAY=0`.
+
+**Web detection is a canary, not a string.** For web profiles the grader runs
+each replay with a fresh random `IVCD_CANARY` (distinct per replay, absent from
+all agent-authored bytes); the target-owned replay entrypoint must plant it in
+protected data. Criterion 3 passes only if the canary appears in output 3/3;
+patch T1 passes only if it no longer does. `detection_signal` in config/manifest
+is descriptive and ignored for verdicts. See `targets/README.md`.
+
+**Prompt fencing.** Anything derived from target data or another agent (recon
+focus areas, upstream `git log`, crash paths) goes through `untrusted_block` /
+`clean_text`; recon output is also capped (15 areas × 400 chars).
+
+**Containers.** All get `--cpus` (default 2, `VULN_PIPELINE_CPUS`), `--cap-drop
+ALL`, `no-new-privileges`, pid limit. cpp replay containers additionally run
+with a read-only root (tmpfs `/tmp`,`/run`) as uid 65534; web replays keep a
+writable root because they start services. Agent/patch containers must write
+`/work`.
+
+**Supply chain.** Base images (`node`, `alpine`, target, proxy) are digest-pinned;
+agent CLIs install with `npm ci` from `harness/locks/<cli>/package-lock.json`
+(sha512-checked). Bump a CLI by editing that `package.json` and regenerating
+the lock (`npm install --package-lock-only --ignore-scripts`). apt packages in
+the agent layer are not version-pinned.
+
+**Audit trail.** Every batch writes `events.jsonl` (OTel/OCSF-shaped:
+`ts, trace_id, event, agent, ...`; events `batch.start/end`, `agent.start/end/
+tool_call/resume/deadline`, `budget.exceeded`, `run.result`) and `agbom.json`
+(models, CLI version, tools, image IDs, sandbox/gateway state, limits, prompt
+hashes; no secrets) in the results dir. Pipe `events.jsonl` to a TUI or SIEM.
 
 ## Gotchas
 

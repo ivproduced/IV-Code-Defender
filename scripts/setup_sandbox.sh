@@ -101,9 +101,43 @@ else
         || die "egress allowlist derivation failed (see error above)"
 fi
 echo "  egress allowlist: $ALLOW"
+# Credential gateway: hold the Anthropic key/token in the proxy container only;
+# agent containers get a placeholder and ANTHROPIC_BASE_URL pointing here, so a
+# key exfiltrated from the container that runs target code is worthless.
+# Covers API-key / OAuth auth on the Claude backend. Bedrock, Vertex and other
+# backends still forward their credentials (see docs/security.md). Opt out with
+# VP_CREDENTIAL_GATEWAY=0.
+GW_ARGS=()
+GW_KEY_VAR=""
+if [ "${VP_CREDENTIAL_GATEWAY:-1}" != "0" ] \
+   && [ "${VULN_PIPELINE_AGENT_BACKEND:-claude}" = "claude" ] \
+   && [ -z "${CLAUDE_CODE_USE_BEDROCK:-}${CLAUDE_CODE_USE_VERTEX:-}" ] \
+   && [ "${VULN_PIPELINE_PROVIDER:-anthropic}" = "anthropic" ]; then
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        GW_KEY_VAR=VP_GATEWAY_API_KEY; export VP_GATEWAY_API_KEY="$ANTHROPIC_API_KEY"
+    elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        GW_KEY_VAR=VP_GATEWAY_OAUTH_TOKEN; export VP_GATEWAY_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
+    fi
+fi
+if [ -n "$GW_KEY_VAR" ]; then
+    GW_UPSTREAM="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+    case "$GW_UPSTREAM" in https://*) ;; *) die "ANTHROPIC_BASE_URL must be https:// for the credential gateway" ;; esac
+    # -e NAME (no value) copies from this shell's env so the secret never
+    # appears in argv / `ps`.
+    # Random shared secret the agent containers present to the gateway. It is
+    # not an Anthropic credential; it only stops other containers on the
+    # default bridge (where the sidecar also listens) from spending the key.
+    export VP_GATEWAY_CLIENT_TOKEN="sk-ant-ivcd-$(openssl rand -hex 24)"
+    GW_ARGS=(-e VP_GATEWAY_UPSTREAM="$GW_UPSTREAM" -e "$GW_KEY_VAR" -e VP_GATEWAY_CLIENT_TOKEN)
+    echo "  credential gateway: on (upstream $GW_UPSTREAM; key held by proxy only)"
+else
+    warn "credential gateway off: model credentials will be passed into agent containers"
+fi
 docker run -d --name "$PROXY_NAME" --restart=unless-stopped \
     -e VP_EGRESS_ALLOW="$ALLOW" \
+    ${GW_ARGS[@]+"${GW_ARGS[@]}"} \
     --network bridge "$PROXY_TAG" >/dev/null
+unset VP_GATEWAY_API_KEY VP_GATEWAY_OAUTH_TOKEN VP_GATEWAY_CLIENT_TOKEN
 docker network connect "$NET" "$PROXY_NAME"
 proxy_ip=$(docker inspect "$PROXY_NAME" --format \
     '{{(index .NetworkSettings.Networks "'$NET'").IPAddress}}')

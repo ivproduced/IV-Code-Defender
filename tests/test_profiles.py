@@ -91,12 +91,8 @@ def test_web_manifest_must_match_configured_replay_contract():
 
     manifest = _manifest()
     manifest["detection_signal"]["value"] = "UNRELATED"
-    try:
-        load_web_manifest(__import__("json").dumps(manifest).encode(), target)
-    except ValueError as exc:
-        assert "detection_signal" in str(exc)
-    else:
-        raise AssertionError("manifest with an unconfigured detection signal accepted")
+    # Descriptive only: never a verdict input, so it need not match config.
+    load_web_manifest(__import__("json").dumps(manifest).encode(), target)
 
 
 def test_cpp_replay_rejects_find_agent_shell_command():

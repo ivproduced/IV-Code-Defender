@@ -12,7 +12,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
+
+# Bounds on data that crosses from an untrusted container to the host.
+DEFAULT_CPUS = "2"
+READ_FILE_MAX_BYTES = 8 * 1024 * 1024
+READ_FILE_TIMEOUT_S = 30
+EXEC_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
 
 def engine() -> str:
@@ -76,6 +83,9 @@ def run(
     runtime: str | None = None,
     env: dict[str, str] | None = None,
     mounts: list[tuple[str, str]] | None = None,
+    cpus: str | None = None,
+    read_only: bool = False,
+    user: str | None = None,
 ) -> str:
     """Start a container, detached, interactive. Cleans up any existing
     container with the same name first (clean slate).
@@ -96,10 +106,18 @@ def run(
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true",
         "--pids-limit", str(pids_limit),
+        "--cpus", cpus or os.environ.get("VULN_PIPELINE_CPUS") or DEFAULT_CPUS,
         # Every caller starts its own shell. Do not run a target image's
         # inherited ENTRYPOINT with model credentials before that shell.
         "--entrypoint", "",
     ]
+    if read_only:
+        # Immutable root; only scratch space is writable.
+        extra += ["--read-only",
+                  "--tmpfs", "/tmp:rw,exec,mode=1777,size=512m",
+                  "--tmpfs", "/run:rw,mode=755,size=16m"]
+    if user:
+        extra += ["--user", user]
     if shm_size:
         extra += ["--shm-size", shm_size]
     for k, v in (env or {}).items():
@@ -150,15 +168,84 @@ def run(
     return name
 
 
-def read_file(container: str, path: str) -> bytes:
-    """Read a file from inside a container. Returns b'' if the file doesn't
-    exist — that's the detection for "agent narrated a PoC path it never wrote".
-    """
-    r = subprocess.run(
-        command("exec", container, "cat", path),
-        capture_output=True,
+def read_file(
+    container: str,
+    path: str,
+    max_bytes: int = READ_FILE_MAX_BYTES,
+    timeout: float = READ_FILE_TIMEOUT_S,
+) -> bytes:
+    """Read a regular file from inside a container. Returns b'' if the file
+    doesn't exist — that's the detection for "agent narrated a PoC path it never wrote".
+
+    ``path`` is chosen by an untrusted agent, so the read is bounded three ways:
+    only regular files (``test -f`` rejects /dev/zero, FIFOs and symlinks to
+    them), at most ``max_bytes`` (larger files are rejected, not truncated, so
+    a clipped PoC never gets graded), and a wall-clock ``timeout`` that kills
+    the host-side exec."""
+    script = 'test -f "$1" && head -c "$2" -- "$1"'
+    try:
+        rc, out, _err, over = _bounded_exec(
+            command("exec", container, "sh", "-c", script, "_", path,
+                    str(max_bytes + 1)),
+            max_output=max_bytes + 1, timeout=timeout, text=False,
+        )
+    except subprocess.TimeoutExpired:
+        return b""
+    if rc != 0 or over or len(out) > max_bytes:
+        return b""
+    return out
+
+
+def _bounded_exec(argv, *, max_output, timeout, text, stdin=None):
+    """Run ``argv`` capturing at most ``max_output`` bytes per stream.
+
+    Excess output is drained and discarded (so the child never blocks on a
+    full pipe) and reported via the ``truncated`` flag. On timeout the child is
+    killed and ``TimeoutExpired`` raised."""
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    return r.stdout if r.returncode == 0 else b""
+    bufs: list[list[bytes]] = [[], []]
+    truncated = [False, False]
+
+    def drain(stream, idx):
+        kept = 0
+        while chunk := stream.read(65536):
+            room = max_output - kept
+            if room > 0:
+                bufs[idx].append(chunk[:room])
+                kept += min(room, len(chunk))
+            if len(chunk) > room:
+                truncated[idx] = True
+
+    threads = [threading.Thread(target=drain, args=(proc.stdout, 0), daemon=True),
+               threading.Thread(target=drain, args=(proc.stderr, 1), daemon=True)]
+    for t in threads:
+        t.start()
+    if stdin is not None:
+        def feed():
+            try:
+                proc.stdin.write(stdin)
+                proc.stdin.close()
+            except OSError:
+                pass
+        threading.Thread(target=feed, daemon=True).start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        for t in threads:
+            t.join(timeout=2)
+        raise subprocess.TimeoutExpired(argv, timeout)
+    for t in threads:
+        t.join(timeout=5)
+    out, err = b"".join(bufs[0]), b"".join(bufs[1])
+    if text:
+        out = out.decode("utf-8", errors="replace")
+        err = err.decode("utf-8", errors="replace")
+    return proc.returncode, out, err, any(truncated)
 
 
 def write_file(container: str, path: str, content: bytes) -> None:
@@ -218,23 +305,63 @@ def tag(source: str, destination: str) -> str:
     return destination
 
 
+class OutputTruncated(RuntimeError):
+    """Captured output hit the cap and the caller needs the whole stream."""
+
+
+def kill_all(container: str) -> None:
+    """SIGKILL every process in a container (PID 1 is immune by design).
+
+    Killing the host-side ``docker exec`` client does not signal the process it
+    started inside the container, so a timed-out command keeps running (and
+    consuming CPU/memory) unless we do this. Only call it on containers owned
+    by a single sequential caller."""
+    try:
+        subprocess.run(
+            command("exec", container, "sh", "-c", "kill -9 -1"),
+            capture_output=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def exec_sh(
-    container: str, shell_command: str, timeout: int | None = None
+    container: str,
+    shell_command: str,
+    timeout: int | None = None,
+    max_output: int = EXEC_MAX_OUTPUT_BYTES,
+    env: dict[str, str] | None = None,
+    fail_on_truncate: bool = False,
 ) -> tuple[int, str, str]:
     """Run a shell command inside a container and return (rc, stdout, stderr).
 
     Unlike read_file/write_file this passes the command through sh -c so shell
-    syntax (pipes, &&, redirects) works. Raises subprocess.TimeoutExpired on
-    timeout — caller decides whether that's a tier failure or a hard error.
+    syntax (pipes, &&, redirects) works. Output is capped at ``max_output``
+    bytes per stream (a marker line is appended when clipped). On timeout the
+    in-container processes are killed and subprocess.TimeoutExpired is raised —
+    caller decides whether that's a tier failure or a hard error.
+
+    ``fail_on_truncate`` raises ``OutputTruncated`` instead of returning clipped
+    output. Use it for *absence* checks ("the canary/ASAN marker is not in the
+    output"): a leak past the cap would otherwise read as a clean run.
+
+    ``env`` sets per-exec variables (used for the web grader's one-shot
+    canary; never pass secrets here — they appear in host argv).
     """
-    r = subprocess.run(
-        command("exec", container, "sh", "-c", shell_command),
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=timeout,
-    )
-    return r.returncode, r.stdout, r.stderr
+    env_args = [a for k, v in (env or {}).items() for a in ("-e", f"{k}={v}")]
+    try:
+        rc, out, err, clipped = _bounded_exec(
+            command("exec", *env_args, container, "sh", "-c", shell_command),
+            max_output=max_output, timeout=timeout, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        kill_all(container)
+        raise
+    if clipped:
+        if fail_on_truncate:
+            raise OutputTruncated(f"output exceeded {max_output} bytes")
+        out += f"\n[output truncated at {max_output} bytes per stream]\n"
+    return rc, out, err
 
 
 def commit(container: str, tag: str) -> str:

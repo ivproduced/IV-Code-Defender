@@ -17,13 +17,17 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlparse
 
 from . import agent_image, docker_ops
 
 RUNTIME_ENV = "VULN_PIPELINE_AGENT_RUNTIME"
 PROXY_ENV = "VULN_PIPELINE_EGRESS_PROXY"
 NETWORK_ENV = "VULN_PIPELINE_AGENT_NETWORK"
+GATEWAY_ENV = "VULN_PIPELINE_CREDENTIAL_GATEWAY"
+GATEWAY_TOKEN_ENV = "VULN_PIPELINE_GATEWAY_TOKEN"
 NETWORK_DEFAULT = "vp-internal"
+NONROOT_USER = "65534:65534"
 VERTEX_CREDENTIAL_PATH = "/run/secrets/google-application-credentials.json"
 
 
@@ -33,6 +37,11 @@ def runtime() -> str | None:
 
 def proxy() -> str | None:
     return os.environ.get(PROXY_ENV) or None
+
+
+def gateway() -> str | None:
+    """URL of the credential-injecting gateway sidecar, when one is active."""
+    return os.environ.get(GATEWAY_ENV) or None
 
 
 def network() -> str:
@@ -67,6 +76,7 @@ def agent_container(
     shm_size: str | None = None,
     mounts: list[tuple[str, str]] | None = None,
     network: str | None = None,
+    hardened: bool = False,
 ) -> Iterator[str]:
     """Spawn the per-phase agent container and tear it down on exit.
 
@@ -77,7 +87,11 @@ def agent_container(
     that never run ``claude -p`` (e.g. the T0–T2 patch grader): they only run
     target code via ``exec_sh`` and don't need any egress, so don't give them
     any — under ``--dangerously-no-sandbox`` the default falls back to
-    ``bridge``, and a binary fed an attacker-crafted PoC shouldn't get that."""
+    ``bridge``, and a binary fed an attacker-crafted PoC shouldn't get that.
+
+    ``hardened`` adds a read-only root filesystem (writable tmpfs ``/tmp`` and
+    ``/run``) and a non-root user. Use it for execution-only replay containers;
+    agent and patch containers must write ``/work``."""
     img = agent_image.ensure(target_tag)
     env, prepared_mounts = _prepare_container_auth(auth, mounts)
     container = docker_ops.run(
@@ -89,6 +103,8 @@ def agent_container(
         shm_size=shm_size,
         env=env,
         mounts=prepared_mounts,
+        read_only=hardened,
+        user=NONROOT_USER if hardened else None,
     )
     try:
         yield container
@@ -99,11 +115,36 @@ def agent_container(
 def container_env(auth: dict[str, str] | None) -> dict[str, str]:
     """Env to set on the agent container at ``docker run`` time.
 
+    With the credential gateway active, Anthropic secrets are replaced by a
+    placeholder ; other providers' credentials
+    still pass through (documented residual risk in docs/security.md).
+
     Auth env from ``harness.auth.resolve_auth_env`` passes straight through;
     the egress proxy is injected (both upper- and lower-case forms — AWS SDKs
     read the lower-case one) when the sandbox is active so the in-container
     CLI can reach the model API."""
     e = dict(auth or {})
+    if (gw := gateway()) and runtime():
+        # Anthropic API-key / OAuth auth: swap the real secret for the
+        # gateway's client token and route through it; the gateway injects the
+        # real credential. The client token only authenticates to the gateway
+        # on the internal network — it is not an Anthropic credential.
+        client_token = os.environ.get(GATEWAY_TOKEN_ENV, "")
+        if not client_token:
+            raise RuntimeError(
+                f"{GATEWAY_ENV} is set but {GATEWAY_TOKEN_ENV} is not; re-run "
+                "scripts/setup_sandbox.sh and launch via bin/vp-sandboxed")
+        swapped = False
+        for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+            if key in e:
+                e[key] = client_token
+                swapped = True
+        if swapped:
+            e["ANTHROPIC_BASE_URL"] = gw
+            # The gateway speaks plain HTTP on the internal network; send it
+            # direct, not through the CONNECT-only egress proxy.
+            host = urlparse(gw).hostname or ""
+            e["NO_PROXY"] = e["no_proxy"] = host
     if p := proxy():
         e["HTTPS_PROXY"] = p
         e["https_proxy"] = p
@@ -153,7 +194,7 @@ def require(override: bool) -> str | None:
     except (RuntimeError, ValueError) as e:
         return f"error: {e}"
     probe = subprocess.run(
-        docker_ops.command("run", "--rm", "--runtime", rt, "alpine:3.21", "true"),
+        docker_ops.command("run", "--rm", "--runtime", rt, agent_image.ALPINE_IMAGE, "true"),
         capture_output=True,
         text=True,
     )

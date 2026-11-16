@@ -98,7 +98,9 @@ async def run_find(
                 profile=target.profile,
                 replay_manifest=manifest,
                 evidence_bundle=evidence,
-                detection_signal=json.dumps(manifest["detection_signal"], sort_keys=True),
+                detection_signal=(
+                    json.dumps(manifest["detection_signal"], sort_keys=True)
+                    if manifest.get("detection_signal") is not None else None),
             ), result, timings
 
         poc_path = parse_xml_tag(text, "poc_path")

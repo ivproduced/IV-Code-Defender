@@ -49,7 +49,7 @@ sudo tee "$CONF" >/dev/null <<EOF
 [engine.runtimes]
 runsc = ["$RUNSC_BIN", "--overlay2=none"]
 EOF
-sudo podman run --rm --runtime=runsc alpine:3.21 true \
+sudo podman run --rm --runtime=runsc alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab true \
     || die "Podman could not start runsc. Rootless Podman is unsupported; check $CONF."
 ok "runsc registered for rootful Podman"
 

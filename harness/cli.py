@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
 
-from . import agent_backends, docker_ops, providers, sandbox, compliance, llm_regression
+from . import agbom, agent_backends, budget, docker_ops, events, providers, sandbox, compliance, llm_regression
 from .agent import color
 from .artifacts import CrashArtifact, RunResult
 from .asan import asan_excerpt, crash_reason, top_frame
@@ -326,6 +326,10 @@ def _write_result(out_dir: Path, result: RunResult) -> None:
         atomic_write_bytes(out_dir / artifact_name, result.crash.poc_bytes)
 
     # result.json — strip transcripts to keep it readable (they're in the JSONLs)
+    events.emit("run.result", status=result.status, out_dir=str(out_dir),
+                crash_type=(result.crash.crash_type if result.crash else None),
+                grade_passed=(result.verdict.passed if result.verdict else None),
+                error=result.error)
     slim = result.to_dict()
     slim["find_transcript"] = f"see find_transcript.jsonl ({len(result.find_transcript)} messages)"
     slim["grade_transcript"] = f"see grade_transcript.jsonl ({len(result.grade_transcript)} messages)"
@@ -1342,6 +1346,51 @@ def _freeze_target_image(target: TargetConfig, image_id: str) -> str:
     return docker_ops.tag(image_id, frozen_tag)
 
 
+def _add_budget_args(p) -> None:
+    p.add_argument("--max-batch-usd", type=float, default=None, metavar="USD",
+                   help="Stop launching/continuing agents once batch spend reaches this "
+                        "(or VULN_PIPELINE_MAX_BATCH_USD). Default: no ceiling.")
+    p.add_argument("--max-batch-tokens", type=float, default=None, metavar="N",
+                   help="Same, in input+output+cache-write tokens "
+                        "(or VULN_PIPELINE_MAX_BATCH_TOKENS).")
+    p.add_argument("--max-agent-usd", type=float, default=None, metavar="USD",
+                   help="Per-agent spend cap forwarded to the CLI's --max-budget-usd "
+                        "(or VULN_PIPELINE_MAX_AGENT_USD).")
+    p.add_argument("--agent-deadline-s", type=float, default=None, metavar="SEC",
+                   help="Wall-clock cap per agent incl. resumes (default 28800 = 8h; "
+                        "or VULN_PIPELINE_AGENT_DEADLINE_S).")
+
+
+def _apply_limits(args) -> None:
+    """Install the batch ledger and deadline before any agent starts."""
+    if not hasattr(args, "max_batch_usd"):
+        return
+    ledger = budget.configure(args.max_batch_usd, args.max_batch_tokens, args.max_agent_usd)
+    backend = agent_backends.selected(getattr(args, "agent_backend", None))
+    if backend != "claude" and (ledger.max_usd or ledger.max_tokens or ledger.max_agent_usd):
+        # Only the Claude stream reports per-message usage and honours
+        # --max-budget-usd. Silently ignoring a ceiling would be worse than
+        # refusing to start.
+        raise ValueError(
+            f"spend/token ceilings are only enforced for the claude backend, not "
+            f"{backend!r}; drop --max-batch-usd/--max-batch-tokens/--max-agent-usd "
+            f"(--agent-deadline-s still applies)")
+    if args.agent_deadline_s:
+        os.environ["VULN_PIPELINE_AGENT_DEADLINE_S"] = str(args.agent_deadline_s)
+
+
+def _start_events(results_root: Path, command: str, **attrs) -> None:
+    events.configure(results_root / "events.jsonl")
+    events.emit("batch.start", command=command, results_dir=str(results_root), **attrs)
+
+
+def _end_events(**attrs) -> None:
+    led = budget.ledger()
+    events.emit("batch.end", usd=round(led.usd, 4), tokens=led.tokens,
+                budget_exceeded=led.exceeded(), **attrs)
+    events.configure(None)
+
+
 def main() -> int:
     # Line-buffer stdout so progress prints appear immediately when piped/
     # redirected (Python block-buffers by default when not a TTY).
@@ -1369,6 +1418,7 @@ def main() -> int:
     )
     p_run.add_argument("--auto-focus", dest="auto_focus", action="store_true",
                        help="Run recon agent to auto-discover focus areas (overrides config.yaml)")
+    _add_budget_args(p_run)
     p_run.add_argument("--max-turns", type=int, default=DEFAULT_FIND_MAX_TURNS,
                        help=f"Find-agent turn budget (default {DEFAULT_FIND_MAX_TURNS})")
     p_run.add_argument("--recon-max-turns", type=int, default=RECON_MAX_TURNS,
@@ -1453,6 +1503,7 @@ def main() -> int:
         )),
         help=f"Maximum concurrent report workflows (default {DEFAULT_MAX_PARALLEL})",
     )
+    _add_budget_args(p_report)
     p_report.add_argument("--max-turns", type=int, default=REPORT_MAX_TURNS,
                           help=f"Report-agent turn budget (default {REPORT_MAX_TURNS})")
     p_report.add_argument("--only-passed", action="store_true",
@@ -1493,6 +1544,7 @@ def main() -> int:
         )),
         help=f"Maximum concurrent patch workflows (default {DEFAULT_MAX_PARALLEL})",
     )
+    _add_budget_args(p_patch)
     p_patch.add_argument("--max-turns", type=int, default=PATCH_MAX_TURNS,
                          help=f"Patch-agent turn budget per iteration (default {PATCH_MAX_TURNS})")
     p_patch.add_argument("--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS,
@@ -1540,6 +1592,11 @@ def main() -> int:
                        action="store_true", help="See `run --help`.")
 
     args = parser.parse_args()
+    try:
+        _apply_limits(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if hasattr(args, "agent_backend"):
         os.environ[agent_backends.ENV] = args.agent_backend
         if args.agent_backend in ("codex", "ollama") and (
@@ -1642,7 +1699,12 @@ def _cmd_run(args) -> int:
 
     try:
         with exclusive_lock(results_root / ".orchestrator.lock"):
+            _start_events(results_root, "run", target=target.name, model=args.model,
+                          runs=args.runs, resume=bool(args.resume))
+            agbom.write(results_root / "agbom.json",
+                        agbom.build(target, model=args.model, auth_env=agent_env, args=args))
             pairs = asyncio.run(_run_all(target, args, agent_env, results_root))
+            _end_events(statuses=[r.status for _d, r in pairs])
     except ResultsLockError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -1938,7 +2000,9 @@ def _cmd_report(args) -> int:
 
     try:
         with exclusive_lock(root / ".orchestrator.lock"):
+            _start_events(root, "report", model=args.model)
             results = asyncio.run(_dispatch())
+            _end_events()
     except ResultsLockError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -2058,7 +2122,9 @@ def _cmd_patch(args) -> int:
 
     try:
         with exclusive_lock(root / ".orchestrator.lock"):
+            _start_events(root, "patch", model=args.model)
             results = asyncio.run(_dispatch())
+            _end_events()
     except ResultsLockError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

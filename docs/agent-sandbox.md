@@ -31,7 +31,11 @@ Agent containers are attached to a Docker network (`vp-internal`) that has no
 connection to the internet. The egress route is through a small proxy container
 on the same network, which only forwards traffic to the model API.
 
-Model credentials and API egress are present in the find, recon, report, and
+With the credential gateway active (default for Claude API-key/OAuth auth; see
+[security.md](security.md#model-credentials-the-credential-gateway)) those
+containers hold only a placeholder token and the real key stays in the proxy
+sidecar. Otherwise (Bedrock, Vertex, other backends, or `VP_CREDENTIAL_GATEWAY=0`),
+model credentials and API egress are present in the find, recon, report, and
 semantic grade agent containers. Their agent images inherit the target image.
 The launcher clears an inherited `ENTRYPOINT` and starts `/bin/bash` explicitly,
 so a target-supplied entrypoint does not run on container startup. This does not

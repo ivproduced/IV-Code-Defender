@@ -26,10 +26,11 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import agent_backends, docker_ops, sandbox
+from . import agent_backends, budget, docker_ops, events, sandbox
 from .io_utils import open_private_text
 
 
@@ -166,6 +167,7 @@ class AgentResult:
     session_id: str | None = None                       # for resume on transient failure
     error: str | None = None                            # if the agent loop died
     resume_count: int = 0                               # how many times we auto-resumed
+    stop_reason: str | None = None                      # terminal non-error stop (e.g. error_max_turns)
 
     def find_tagged_message(self, tag: str) -> str:
         """Return the most-recent assistant message text containing <tag>.
@@ -213,6 +215,7 @@ def build_claude_argv(
     tools: list[str] | None,
     permission_mode: str,
     system_prompt: str | None = None,
+    max_budget_usd: float | None = None,
 ) -> list[str]:
     """Build the argv passed to the in-container Claude CLI."""
     # ``None`` means the normal agent tool set; an explicit empty list means
@@ -230,7 +233,60 @@ def build_claude_argv(
     ]
     if system_prompt:
         argv += ["--system-prompt", system_prompt]
+    if max_budget_usd:
+        argv += ["--max-budget-usd", f"{max_budget_usd:g}"]
     return argv
+
+
+DEFAULT_DEADLINE_S = 8 * 3600
+STDERR_TAIL_BYTES = 64 * 1024
+
+# CLI result subtypes that mean "the agent ran out of budget", not "the call
+# failed". Resuming cannot help: the same limit trips again, so a retry loop
+# would burn up to max_resume_attempts sessions for nothing.
+_TERMINAL_SUBTYPES = ("error_max_turns", "error_max_budget_usd",
+                      "error_max_structured_output_retries")
+# Non-transient API failures: retrying a bad key or exhausted credit is waste.
+_FATAL_MARKERS = ("invalid x-api-key", "invalid api key", "authentication_error",
+                  "credit balance", "permission_error", "oauth token has expired")
+
+
+def _deadline_default() -> float:
+    raw = os.environ.get("VULN_PIPELINE_AGENT_DEADLINE_S", "").strip()
+    try:
+        return float(raw) if raw else float(DEFAULT_DEADLINE_S)
+    except ValueError:
+        return float(DEFAULT_DEADLINE_S)
+
+
+async def _drain_stderr(stream, sink: bytearray) -> None:
+    """Read stderr concurrently with stdout, keeping only the tail.
+
+    Reading it after stdout closes lets a chatty CLI fill the stderr pipe and
+    block forever while we wait on stdout."""
+    try:
+        while chunk := await stream.read(65536):
+            sink.extend(chunk)
+            if len(sink) > STDERR_TAIL_BYTES:
+                del sink[:len(sink) - STDERR_TAIL_BYTES]
+    except Exception:
+        pass
+
+
+async def _stop(proc, container: str | None = None) -> None:
+    """Terminate the host-side exec client, escalating to kill.
+
+    ``docker exec`` does not forward the signal to the in-container CLI, so
+    for a deadline/budget stop we also SIGKILL the container's processes."""
+    if proc.returncode is None:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), 10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+    if container:
+        await asyncio.to_thread(docker_ops.kill_all, container)
 
 
 async def run_agent(
@@ -245,6 +301,7 @@ async def run_agent(
     progress_prefix: str | None = None,
     tools: list[str] | None = None,
     system_prompt: str | None = None,
+    deadline_s: float | None = None,
 ) -> AgentResult:
     """Run the selected agent CLI inside ``container``.
 
@@ -265,6 +322,10 @@ async def run_agent(
     as it arrives (fsync'd). A process kill mid-run still leaves a readable
     transcript on disk. Every `heartbeat_every` assistant turns, a progress
     line is printed so long runs don't look hung.
+
+    Bounds: ``deadline_s`` (default 8h, env ``VULN_PIPELINE_AGENT_DEADLINE_S``)
+    is a wall-clock cap over the whole run including resumes; the shared
+    :mod:`budget` ledger stops agents once the batch spend/token ceiling is hit.
     """
     backend = agent_backends.selected()
     if backend in ("codex", "ollama") and tools == []:
@@ -291,19 +352,46 @@ async def run_agent(
         constraints = [f"Complete within {max_turns} agent turns."]
         prompt = "\n\n".join([*constraints, prompt])
     result = AgentResult()
+    agent_label = progress_prefix or "[agent]"
+    started = time.monotonic()
+    deadline_at = started + (deadline_s if deadline_s is not None else _deadline_default())
+    ledger = budget.ledger()
+    events.emit("agent.start", agent_label, model=model, backend=backend,
+                max_turns=max_turns, tools=(DEFAULT_TOOLS if tools is None else tools))
     attempt = 0
     assistant_count = 0
     tool_call_count = 0
     gemini_text = ""
+    held_cap: float | None = None   # dollar reservation of the in-flight launch
+    holding = False
+    launch_cost = 0.0
 
     transcript_file = open_private_text(transcript_path, "w") if transcript_path else None
     try:
         while True:
+            if (reason := ledger.exceeded()):
+                result.error = f"budget exceeded: {reason}"
+                events.emit("budget.exceeded", agent_label, reason=reason)
+                return result
+            if time.monotonic() >= deadline_at:
+                result.error = "deadline exceeded before launch"
+                return result
+            if holding:  # book the previous launch before reserving the next
+                ledger.end_launch(held_cap, launch_cost)
+                holding = False
+            try:
+                held_cap = ledger.begin_launch()
+            except budget.BudgetExhausted as exc:
+                result.error = f"budget exceeded: {exc}"
+                events.emit("budget.exceeded", agent_label, reason=str(exc))
+                return result
+            holding, launch_cost = True, 0.0
             resume_id = result.session_id if attempt > 0 else None
             cmd = agent_backends.command(
                 container, backend, model=model, max_turns=max_turns,
                 tools=tools, system_prompt=system_prompt,
                 resume_id=resume_id, sandboxed=bool(sandbox.runtime()),
+                max_budget_usd=held_cap,
             )
             if backend == "gemini":
                 # A system override prevents untrusted .gemini/settings.json
@@ -339,14 +427,21 @@ async def run_agent(
                 limit=16 * 1024 * 1024,
             )
             assert proc.stdout
-            if prompt_stdin is not None:
-                assert proc.stdin
-                proc.stdin.write(prompt_stdin)
-                await proc.stdin.drain()
-                proc.stdin.close()
-                await proc.stdin.wait_closed()
-
-            try:
+            stderr_tail = bytearray()
+            stderr_task = (asyncio.create_task(_drain_stderr(proc.stderr, stderr_tail))
+                           if proc.stderr else None)
+            async def _consume() -> AgentResult | None:
+                """Read stdout until a result lands. Returns the final result
+                (terminal) or None if the stream ended without one."""
+                nonlocal assistant_count, tool_call_count, gemini_text, launch_cost
+                if prompt_stdin is not None:
+                    # Prompt delivery is under the deadline too: a CLI that
+                    # never reads stdin must not hang us past it.
+                    assert proc.stdin
+                    proc.stdin.write(prompt_stdin)
+                    await proc.stdin.drain()
+                    proc.stdin.close()
+                    await proc.stdin.wait_closed()
                 async for raw in proc.stdout:
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line:
@@ -363,6 +458,7 @@ async def run_agent(
                         event = {**event, "response": gemini_text}
                     for msg in agent_backends.normalize(backend, event):
                         result.messages.append(msg)
+                        ledger.record_message(msg)
                         if progress_prefix:
                             _progress_line(msg, progress_prefix)
                         if transcript_file:
@@ -376,52 +472,94 @@ async def run_agent(
                         if mtype == "assistant":
                             if tools == [] and _contains_tool_use(msg):
                                 result.error = "no-tools agent attempted a tool call"
-                                proc.terminate()
-                                await proc.wait()
                                 return result
                             assistant_count += 1
-                            tool_call_count += sum(
-                                1 for b in msg.get("message", {}).get("content", [])
-                                if isinstance(b, dict) and b.get("type") == "tool_use"
-                            )
+                            for b in msg.get("message", {}).get("content", []):
+                                if isinstance(b, dict) and b.get("type") == "tool_use":
+                                    tool_call_count += 1
+                                    inp = b.get("input") or {}
+                                    events.emit(
+                                        "agent.tool_call", agent_label, tool=b.get("name"),
+                                        arg=str(inp.get("command") or inp.get("file_path")
+                                                or inp.get("path") or "")[:200],
+                                    )
                             if assistant_count % heartbeat_every == 0:
                                 print(f"  [agent] {tool_call_count} tool calls "
                                       f"({assistant_count} msgs)")
+                            if (reason := ledger.exceeded()):
+                                result.error = f"budget exceeded: {reason}"
+                                events.emit("budget.exceeded", agent_label, reason=reason)
+                                return result
                         elif mtype == "system" and msg.get("subtype") == "init":
                             sid = msg.get("session_id")
                             if sid and result.session_id is None:
                                 result.session_id = sid
                         elif mtype == "result":
                             result.result_message = msg
-                        # Agents with run_in_background bash tasks keep the CLI
-                        # stream alive past the result message: each pending
-                        # task_notification re-inits the session inline. Break
-                        # on the FIRST result instead of waiting for stream
-                        # exhaustion — otherwise a fuzzing agent with many
-                        # background tasks never terminates. Error results
-                        # route through the resume path.
+                            launch_cost = float(msg.get("total_cost_usd") or 0.0)
+                            subtype = str(msg.get("subtype") or "")
+                            # Agents with run_in_background bash tasks keep the
+                            # CLI stream alive past the result message; break on
+                            # the FIRST result instead of waiting for stream
+                            # exhaustion.
+                            if subtype in _TERMINAL_SUBTYPES:
+                                # Budget/turn exhaustion arrives with is_error
+                                # set on some CLI versions. Resuming re-trips the
+                                # same limit, so record it and stop — partial
+                                # output (tags emitted before the limit) is kept.
+                                result.stop_reason = subtype
+                                if subtype != "error_max_turns":
+                                    # Out of money is not a clean finish: a
+                                    # re-attack or grader must not read it as
+                                    # "attacked and found nothing".
+                                    result.error = f"budget exhausted: {subtype}"
+                                return result
                             if msg.get("is_error"):
-                                raise RuntimeError(
-                                    f"CLI result is_error: {msg.get('result')}"
-                                )
-                            proc.terminate()
-                            await proc.wait()
+                                detail = str(msg.get("result"))
+                                if any(m in detail.lower() for m in _FATAL_MARKERS):
+                                    result.error = f"non-retryable CLI error: {detail[:500]}"
+                                    return result
+                                raise RuntimeError(f"CLI result is_error: {detail}")
                             return result
+                return None
 
-                # Stream ended without a result message — process died.
+            async def _attempt() -> AgentResult:
+                """One CLI launch, start to process exit, under one deadline."""
+                final = await _consume()
+                if final is not None:
+                    return final
+                # Stream ended without a result message — wait for exit too:
+                # a CLI that closes stdout but never exits must not hang us.
                 rc = await proc.wait()
-                stderr = b""
-                if proc.stderr:
-                    stderr = await proc.stderr.read()
+                if stderr_task:
+                    try:
+                        await asyncio.wait_for(stderr_task, 5)
+                    except asyncio.TimeoutError:
+                        pass
                 raise RuntimeError(
                     f"CLI exited rc={rc} without result: "
-                    f"{stderr.decode(errors='replace')[:2000]}"
+                    f"{bytes(stderr_tail).decode(errors='replace')[-2000:]}"
                 )
 
+            try:
+                remaining = deadline_at - time.monotonic()
+                try:
+                    final = await asyncio.wait_for(_attempt(), timeout=max(remaining, 0.001))
+                except asyncio.TimeoutError:
+                    await _stop(proc, container)
+                    result.error = (f"deadline exceeded after "
+                                    f"{time.monotonic() - started:.0f}s")
+                    events.emit("agent.deadline", agent_label,
+                                elapsed_s=time.monotonic() - started)
+                    return result
+                # An error stop (budget, no-tools violation, fatal CLI error)
+                # must also kill the in-container CLI: terminating the host-side
+                # exec client alone leaves it running and spending.
+                await _stop(proc, container if final.error else None)
+                return final
+
             except Exception as e:
-                if proc.returncode is None:
-                    proc.terminate()
-                    await proc.wait()
+                await _stop(proc)
                 # 429 rate-limit, upstream 5xx, or CLI crash all surface here.
                 # The attempt cap bounds wasted retries on a genuine bug.
                 attempt += 1
@@ -434,13 +572,25 @@ async def run_agent(
                 # outlast shorter caps; 20 attempts × 300s ≈ 1h retry budget,
                 # proportionate to overnight runs.
                 backoff = min(2 ** attempt, 300)
+                if time.monotonic() + backoff >= deadline_at:
+                    result.error = f"deadline exceeded while retrying: {e}"
+                    return result
                 print(
                     f"[agent] {type(e).__name__} on attempt {attempt}, "
                     f"resuming session {result.session_id} in {backoff}s: {e}",
                     file=sys.stderr,
                 )
                 result.resume_count = attempt
+                events.emit("agent.resume", agent_label, attempt=attempt,
+                            error=str(e)[:300])
                 await asyncio.sleep(backoff)
     finally:
+        if holding:
+            ledger.end_launch(held_cap, launch_cost)
+        events.emit("agent.end", agent_label,
+                    elapsed_s=time.monotonic() - started,
+                    error=result.error, stop_reason=result.stop_reason,
+                    resumes=result.resume_count, tool_calls=tool_call_count,
+                    cost_usd=(result.result_message or {}).get("total_cost_usd"))
         if transcript_file:
             transcript_file.close()

@@ -161,7 +161,7 @@ def _exec_sequence(results):
     """Mock for docker_ops.exec_sh that returns a fixed sequence of (rc,out,err)."""
     it = iter(results)
 
-    def _f(container, cmd, timeout=None):
+    def _f(container, cmd, timeout=None, env=None, fail_on_truncate=False):
         return next(it)
 
     return _f

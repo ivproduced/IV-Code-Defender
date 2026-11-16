@@ -34,3 +34,15 @@ def untrusted_block(text: str, nonce: str) -> str:
         f"{sanitize_untrusted(text)}\n"
         f'</untrusted_data id="{nonce}">'
     )
+
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def clean_text(text: str, max_len: int = 2000) -> str:
+    """Strip control characters and cap length of model-derived text.
+
+    For text produced by another agent (recon focus areas) or derived from
+    target/upstream data (git log, crash paths). Newlines and tabs survive;
+    everything else non-printable is dropped before the text is fenced."""
+    return _CONTROL.sub("", text)[:max_len]
