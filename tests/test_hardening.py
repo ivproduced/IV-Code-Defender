@@ -471,3 +471,41 @@ def test_gateway_injects_credential_and_blocks_other_paths(monkeypatch):
         assert c2.getresponse().status == 403
     finally:
         srv.shutdown()
+
+
+def test_gateway_drops_unlisted_and_sanitizes_response_headers(monkeypatch):
+    import http.client
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    proxy = _load_proxy()
+    monkeypatch.setattr(proxy, "GATEWAY_UPSTREAM", "https://api.example.test")
+    monkeypatch.setattr(proxy, "GATEWAY_API_KEY", "K")
+
+    class FakeResp:
+        status = 200
+        def __init__(self): self._d = [b"x", b""]
+        def getheaders(self):
+            return [("Content-Type", "text/plain"),
+                    ("X-Evil", "a"), ("Set-Cookie", "s=1"),
+                    ("anthropic-ratelimit", "ok\r\nInjected: 1")]
+        def read(self, n): return self._d.pop(0)
+
+    class FakeConn:
+        def __init__(self, *a, **k): pass
+        def request(self, *a, **k): pass
+        def getresponse(self): return FakeResp()
+        def close(self): pass
+
+    monkeypatch.setattr(proxy.http.client, "HTTPSConnection", FakeConn)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Gateway)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+        c.request("POST", "/v1/messages", body=b"{}")
+        r = c.getresponse()
+        h = {k.lower(): v for k, v in r.getheaders()}
+        assert "x-evil" not in h and "set-cookie" not in h
+        assert "injected" not in h and h["anthropic-ratelimit"] == "okInjected: 1"
+    finally:
+        srv.shutdown()

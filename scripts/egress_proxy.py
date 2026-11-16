@@ -48,6 +48,9 @@ GATEWAY_MAX_BODY = 32 * 1024 * 1024
 _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
         "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
         "x-api-key", "authorization"}
+_RESP_HEADERS = {"content-type", "content-encoding", "cache-control", "retry-after",
+                 "request-id", "x-request-id"}
+_CTL = re.compile(r"[\x00-\x1f\x7f]")
 SOCKET_TIMEOUT = 60
 MAX_TUNNEL_SECONDS = int(os.environ.get("VP_EGRESS_MAX_TUNNEL_S") or 4 * 3600)
 
@@ -157,8 +160,11 @@ class Gateway(BaseHTTPRequestHandler):
         # Close-delimited response: simplest correct way to stream SSE.
         self.send_response(resp.status)
         for k, v in resp.getheaders():
-            if k.lower() not in _HOP:
-                self.send_header(k, v)
+            # Allowlist + CR/LF/control stripping: upstream header text must
+            # never be able to split the response we send to the container.
+            name = k.lower()
+            if name in _RESP_HEADERS or name.startswith("anthropic-"):
+                self.send_header(_CTL.sub("", k), _CTL.sub("", v))
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
