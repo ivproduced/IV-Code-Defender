@@ -323,6 +323,8 @@ available set.
 Directory under `targets/` with a Dockerfile (ASAN build) + `config.yaml`. No
 pipeline code changes. See `targets/README.md`.
 
+**Profiles:** `cpp_asan` (default), `python_exec` (runtime monitor + machine proof rules, `targets/pycanary`), and the web profiles. `python_exec` has no patch/dedup/standalone-report support yet.
+
 **Shipped targets:** `canary` is the fast-iteration smoke test (~6min, 3
 planted bugs). `drlibs`, `alsa`, and `htslib` are real-world CVE demo
 targets — pinned to vulnerable commits, with per-target READMEs documenting

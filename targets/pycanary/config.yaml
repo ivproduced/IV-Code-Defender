@@ -1,0 +1,27 @@
+# Copyright 2026 IVProduced contributors
+# SPDX-License-Identifier: Apache-2.0
+profile: python_exec
+image_tag: vuln-pipeline-pycanary:latest
+# Local-only canary — no upstream. Required by the loader, shown in prompts.
+github_url: "(local canary target — targets/pycanary/app)"
+commit: "n/a"
+binary_path: /opt/vp/entry.py     # replay entry, outside source_root
+source_root: /work/app
+# Target code may open files only under these roots. Anything else, found by
+# changing only the PoC, is a path_escape.
+allowed_roots:
+  - /work/app/data
+allowed_hosts: []
+
+focus_areas:
+  - "diag command (pycanary.handlers.diag) — attacker text spliced into a shell command"
+  - "read command (pycanary.handlers.read) — attacker filename joined to a data directory"
+  - "load command (pycanary.handlers.load) — attacker bytes passed to a deserializer"
+
+known_bugs: []
+
+attack_surface: |
+  Local canary. The only input is the contents of the file passed to
+  /opt/vp/entry.py. Its first line is `<command> <argument>`; the commands
+  diag, read and load are all reachable from any untrusted file. No
+  environment variables, other files, or network input are attacker-controlled.

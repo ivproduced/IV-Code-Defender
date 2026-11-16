@@ -126,6 +126,7 @@ async def run_find(
             crash_output=crash_output[:10_000],  # ASAN traces are huge; top is what matters
             exit_code=_parse_exit_code(exit_code_str),
             dup_check=dup_check,
+            profile=target.profile,
         )
         return crash, result, timings
 

@@ -1,0 +1,20 @@
+{
+  "target": "pycanary",
+  "status": "crash_found",
+  "crash": {
+    "poc_path": "/tmp/poc.bin",
+    "poc_bytes": "ZGlhZyB4OyBpdmNkLXByb29mCg==",
+    "reproduction_command": "/opt/vp/entry.py /tmp/poc.bin",
+    "crash_type": "exec",
+    "crash_output": "<token> IVCD-EVENT {\"kind\":\"command\",\"sink\":\"os.system\",\"args\":[\"echo diag x; ivcd-proof\"],\"frame\":{\"file\":\"/work/app/pycanary/handlers.py\",\"function\":\"diag\",\"line\":19}}\n",
+    "exit_code": 0,
+    "dup_check": "fixture",
+    "profile": "python_exec"
+  },
+  "verdict": {
+    "passed": true,
+    "score": 1.0,
+    "criteria": {},
+    "evidence": "fixture"
+  }
+}

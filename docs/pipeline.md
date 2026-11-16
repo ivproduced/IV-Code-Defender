@@ -102,6 +102,21 @@ Each completed report also carries a CWE and NIST SP 800-53 Release 5.2.0
 mapping. Run `bin/vp-sandboxed oscal <results-dir>` to aggregate those mappings
 into an OSCAL 1.1.3 assessment-results document.
 
+**Python profile (`python_exec`).** For Python targets the proof is a runtime
+signal rather than a sanitizer crash. A `sitecustomize` audit hook
+(`harness/monitor/`, shipped at `/opt/vp/monitor`) reports dangerous operations
+performed by code under `source_root`; the grader replays the PoC three times
+with a fresh random token each time and applies fixed rules in
+`harness/pyexec.py`: `exec` (an `ivcd-proof` command), `path_escape` (an `open`
+outside `allowed_roots`) or `secret_read` (a grader-planted canary file's
+contents in the output). Lines without the current token are ignored, and a
+missing monitor, unparseable event, or token/canary inside the PoC fails
+closed. Limits of the monitor (events it cannot see, token exposure to code
+that already has arbitrary execution, gVisor) are listed in
+[targets/README.md](../targets/README.md#python_exec-python-runtime-monitor-verified).
+Phase 1 covers find, grade, judge and report; patch, standalone `dedup` and
+standalone `report` refuse `python_exec` results.
+
 **Dedup.** A separate command that can be run post-hoc to cluster the pipeline
 results by ASAN signature. It's useful for a quick summary of "these N crashes
 cluster into M signatures".
