@@ -27,6 +27,37 @@ def _prompt_hashes() -> dict[str, str]:
     }
 
 
+_SECRET_KEYS = frozenset({
+    "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK",
+    "GOOGLE_APPLICATION_CREDENTIALS", "OPENAI_API_KEY", "GEMINI_API_KEY",
+})
+
+
+def _credential_posture(auth_env: dict | None) -> dict:
+    """What an agent container would actually hold for THIS batch.
+
+    Derived from the real transformation (``sandbox.container_env``), not from
+    whether a gateway URL happens to be configured: Bedrock/Vertex/other
+    backends pass credentials through even when a gateway exists."""
+    auth = auth_env or {}
+    try:
+        in_container = sandbox.container_env(auth)
+    except RuntimeError as exc:
+        return {"kinds": sorted(auth), "gateway": bool(sandbox.gateway()),
+                "in_agent_container": "unknown", "error": str(exc)}
+    exposed = sorted(k for k in auth
+                     if k in _SECRET_KEYS and in_container.get(k) == auth[k])
+    return {
+        "kinds": sorted(k for k in auth if k in _SECRET_KEYS),
+        "gateway": bool(sandbox.gateway()),
+        "gateway_applied": any(in_container.get(k) != v
+                               for k, v in auth.items() if k in _SECRET_KEYS),
+        "real_credentials_in_agent_container": exposed,
+        "in_agent_container": "real" if exposed else ("placeholder-only" if auth else "none"),
+    }
+
+
 def build(target, *, model: str, auth_env: dict | None, args=None,
           target_image_id: str | None = None) -> dict:
     backend = agent_backends.selected()
@@ -51,11 +82,7 @@ def build(target, *, model: str, auth_env: dict | None, args=None,
                       "judge/compare/report-grader/semantic-grader": []},
             "mcp": "disabled", "setting_sources": "none",
         },
-        "credentials": {
-            "kinds": sorted((auth_env or {}).keys()),
-            "gateway": bool(sandbox.gateway()),
-            "in_agent_container": ("placeholder-only" if sandbox.gateway() else "real"),
-        },
+        "credentials": _credential_posture(auth_env),
         "sandbox": {
             "runtime": sandbox.runtime(), "network": sandbox.network(),
             "egress_proxy": sandbox.proxy(),

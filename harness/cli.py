@@ -1365,7 +1365,16 @@ def _apply_limits(args) -> None:
     """Install the batch ledger and deadline before any agent starts."""
     if not hasattr(args, "max_batch_usd"):
         return
-    budget.configure(args.max_batch_usd, args.max_batch_tokens, args.max_agent_usd)
+    ledger = budget.configure(args.max_batch_usd, args.max_batch_tokens, args.max_agent_usd)
+    backend = agent_backends.selected(getattr(args, "agent_backend", None))
+    if backend != "claude" and (ledger.max_usd or ledger.max_tokens or ledger.max_agent_usd):
+        # Only the Claude stream reports per-message usage and honours
+        # --max-budget-usd. Silently ignoring a ceiling would be worse than
+        # refusing to start.
+        raise ValueError(
+            f"spend/token ceilings are only enforced for the claude backend, not "
+            f"{backend!r}; drop --max-batch-usd/--max-batch-tokens/--max-agent-usd "
+            f"(--agent-deadline-s still applies)")
     if args.agent_deadline_s:
         os.environ["VULN_PIPELINE_AGENT_DEADLINE_S"] = str(args.agent_deadline_s)
 

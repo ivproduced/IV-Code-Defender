@@ -20,6 +20,13 @@ import threading
 from dataclasses import dataclass, field
 
 
+MIN_RESERVE_USD = 0.01
+
+
+class BudgetExhausted(Exception):
+    """No spend headroom left to start another agent launch."""
+
+
 def _env_float(name: str) -> float | None:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -39,6 +46,7 @@ class Ledger:
     max_tokens: float | None = None
     max_agent_usd: float | None = None
     usd: float = 0.0
+    reserved: float = 0.0   # dollars held by in-flight CLI launches
     tokens: int = 0
     _seen: set = field(default_factory=set, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -61,10 +69,34 @@ class Ledger:
                 for k in ("input_tokens", "output_tokens", "cache_creation_input_tokens")
             )
 
-    def record_cost(self, usd: float | None) -> None:
-        if usd:
-            with self._lock:
-                self.usd += float(usd)
+    def begin_launch(self) -> float | None:
+        """Reserve spend for one CLI launch and return the cap to pass as
+        ``--max-budget-usd`` (None = uncapped).
+
+        Dollar cost only arrives when a session ends, so the batch ceiling is
+        enforced *live* by reservation: each launch may spend at most
+        min(per-agent cap, ceiling - spent - already reserved), and the CLI
+        itself stops at that cap. Raises BudgetExhausted if nothing is left."""
+        with self._lock:
+            cap = self.max_agent_usd
+            if self.max_usd is not None:
+                remaining = self.max_usd - self.usd - self.reserved
+                if remaining < MIN_RESERVE_USD:
+                    raise BudgetExhausted(
+                        f"batch spend ${self.usd:.2f} + in-flight ${self.reserved:.2f} "
+                        f"reached ceiling ${self.max_usd:.2f}")
+                cap = remaining if cap is None else min(cap, remaining)
+            if cap is not None:
+                self.reserved += cap
+            return cap
+
+    def end_launch(self, cap: float | None, actual_usd: float | None) -> None:
+        """Release a reservation and book what the launch actually cost."""
+        with self._lock:
+            if cap is not None:
+                self.reserved = max(0.0, self.reserved - cap)
+            if actual_usd:
+                self.usd += float(actual_usd)
 
     def exceeded(self) -> str | None:
         with self._lock:
@@ -82,6 +114,8 @@ def configure(max_usd: float | None = None, max_tokens: float | None = None,
               max_agent_usd: float | None = None) -> Ledger:
     """Reset the process-global ledger. CLI flags win over the environment."""
     global _ledger
+    # Without a per-agent cap one launch could reserve the whole ceiling and
+    # starve every parallel sibling, so require both.
     _ledger = Ledger(
         max_usd=max_usd if max_usd is not None else _env_float("VULN_PIPELINE_MAX_BATCH_USD"),
         max_tokens=(max_tokens if max_tokens is not None
@@ -89,6 +123,11 @@ def configure(max_usd: float | None = None, max_tokens: float | None = None,
         max_agent_usd=(max_agent_usd if max_agent_usd is not None
                        else _env_float("VULN_PIPELINE_MAX_AGENT_USD")),
     )
+    if _ledger.max_usd is not None and _ledger.max_agent_usd is None:
+        raise ValueError(
+            "--max-batch-usd requires --max-agent-usd (or VULN_PIPELINE_MAX_AGENT_USD): "
+            "dollar cost is only reported when a session ends, so live enforcement "
+            "reserves a per-agent share of the ceiling")
     return _ledger
 
 

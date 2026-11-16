@@ -25,10 +25,8 @@ RUNTIME_ENV = "VULN_PIPELINE_AGENT_RUNTIME"
 PROXY_ENV = "VULN_PIPELINE_EGRESS_PROXY"
 NETWORK_ENV = "VULN_PIPELINE_AGENT_NETWORK"
 GATEWAY_ENV = "VULN_PIPELINE_CREDENTIAL_GATEWAY"
+GATEWAY_TOKEN_ENV = "VULN_PIPELINE_GATEWAY_TOKEN"
 NETWORK_DEFAULT = "vp-internal"
-# Placeholder the in-container CLI sends; the gateway replaces it with the
-# real credential, which never enters a container that runs target code.
-GATEWAY_PLACEHOLDER = "sk-ant-ivcd-gateway-placeholder"
 NONROOT_USER = "65534:65534"
 VERTEX_CREDENTIAL_PATH = "/run/secrets/google-application-credentials.json"
 
@@ -118,7 +116,7 @@ def container_env(auth: dict[str, str] | None) -> dict[str, str]:
     """Env to set on the agent container at ``docker run`` time.
 
     With the credential gateway active, Anthropic secrets are replaced by a
-    placeholder (see ``GATEWAY_PLACEHOLDER``); other providers' credentials
+    placeholder ; other providers' credentials
     still pass through (documented residual risk in docs/security.md).
 
     Auth env from ``harness.auth.resolve_auth_env`` passes straight through;
@@ -127,12 +125,19 @@ def container_env(auth: dict[str, str] | None) -> dict[str, str]:
     CLI can reach the model API."""
     e = dict(auth or {})
     if (gw := gateway()) and runtime():
-        # Anthropic API-key / OAuth auth: swap the real secret for a
-        # placeholder and route through the gateway, which injects it.
+        # Anthropic API-key / OAuth auth: swap the real secret for the
+        # gateway's client token and route through it; the gateway injects the
+        # real credential. The client token only authenticates to the gateway
+        # on the internal network — it is not an Anthropic credential.
+        client_token = os.environ.get(GATEWAY_TOKEN_ENV, "")
+        if not client_token:
+            raise RuntimeError(
+                f"{GATEWAY_ENV} is set but {GATEWAY_TOKEN_ENV} is not; re-run "
+                "scripts/setup_sandbox.sh and launch via bin/vp-sandboxed")
         swapped = False
         for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
             if key in e:
-                e[key] = GATEWAY_PLACEHOLDER
+                e[key] = client_token
                 swapped = True
         if swapped:
             e["ANTHROPIC_BASE_URL"] = gw

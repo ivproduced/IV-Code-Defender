@@ -243,15 +243,23 @@ timeouts (non-blocking `sendall` dropped large streams).
 **Spend ceilings.** Turns alone do not bound a batch. `--max-batch-usd`,
 `--max-batch-tokens`, `--max-agent-usd` (env `VULN_PIPELINE_MAX_BATCH_USD`,
 `..._MAX_BATCH_TOKENS`, `..._MAX_AGENT_USD`) feed `harness/budget.py`, a
-process-global ledger every agent checks as messages stream in. Results with
+process-global ledger. Dollar ceilings are enforced live by reservation: each
+CLI launch gets `--max-budget-usd min(per-agent cap, ceiling − spent − in-flight)`,
+so `--max-batch-usd` requires `--max-agent-usd`; token ceilings count assistant
+usage as it streams. Both are Claude-backend only (other backends are refused
+rather than silently unenforced). Results with
 subtype `error_max_turns` / `error_max_budget_usd` are terminal (recorded in
-`AgentResult.stop_reason`, never resumed); auth/credit errors are
-non-retryable. Other `is_error` results still go through the resume loop.
+`AgentResult.stop_reason`, never resumed; running out of budget also sets
+`error` so re-attack/grading cannot read it as a clean run); auth/credit errors
+are non-retryable. The deadline covers prompt delivery, output and process exit;
+error stops kill the in-container CLI. Other `is_error` results still go through the resume loop.
 
 **Credential gateway.** `scripts/setup_sandbox.sh` starts the proxy sidecar with
 the Anthropic key/OAuth token (Claude backend, API-key/OAuth auth only);
-`bin/vp-sandboxed` detects it and sets `VULN_PIPELINE_CREDENTIAL_GATEWAY`.
-`sandbox.container_env` then gives containers a placeholder token and
+`bin/vp-sandboxed` detects it and sets `VULN_PIPELINE_CREDENTIAL_GATEWAY` and
+`VULN_PIPELINE_GATEWAY_TOKEN` (a random per-setup client secret the gateway
+requires, since the sidecar also listens on the default bridge).
+`sandbox.container_env` then gives containers that client token and
 `ANTHROPIC_BASE_URL=http://<proxy>:8080`; the gateway injects the real
 credential, forwards only `/v1/messages` and `/v1/models`, and the key never
 enters a container that runs target code. Bedrock/Vertex/Codex/Gemini

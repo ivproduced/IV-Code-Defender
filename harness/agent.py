@@ -362,6 +362,9 @@ async def run_agent(
     assistant_count = 0
     tool_call_count = 0
     gemini_text = ""
+    held_cap: float | None = None   # dollar reservation of the in-flight launch
+    holding = False
+    launch_cost = 0.0
 
     transcript_file = open_private_text(transcript_path, "w") if transcript_path else None
     try:
@@ -373,12 +376,22 @@ async def run_agent(
             if time.monotonic() >= deadline_at:
                 result.error = "deadline exceeded before launch"
                 return result
+            if holding:  # book the previous launch before reserving the next
+                ledger.end_launch(held_cap, launch_cost)
+                holding = False
+            try:
+                held_cap = ledger.begin_launch()
+            except budget.BudgetExhausted as exc:
+                result.error = f"budget exceeded: {exc}"
+                events.emit("budget.exceeded", agent_label, reason=str(exc))
+                return result
+            holding, launch_cost = True, 0.0
             resume_id = result.session_id if attempt > 0 else None
             cmd = agent_backends.command(
                 container, backend, model=model, max_turns=max_turns,
                 tools=tools, system_prompt=system_prompt,
                 resume_id=resume_id, sandboxed=bool(sandbox.runtime()),
-                max_budget_usd=ledger.max_agent_usd,
+                max_budget_usd=held_cap,
             )
             if backend == "gemini":
                 # A system override prevents untrusted .gemini/settings.json
@@ -417,17 +430,18 @@ async def run_agent(
             stderr_tail = bytearray()
             stderr_task = (asyncio.create_task(_drain_stderr(proc.stderr, stderr_tail))
                            if proc.stderr else None)
-            if prompt_stdin is not None:
-                assert proc.stdin
-                proc.stdin.write(prompt_stdin)
-                await proc.stdin.drain()
-                proc.stdin.close()
-                await proc.stdin.wait_closed()
-
             async def _consume() -> AgentResult | None:
                 """Read stdout until a result lands. Returns the final result
                 (terminal) or None if the stream ended without one."""
-                nonlocal assistant_count, tool_call_count, gemini_text
+                nonlocal assistant_count, tool_call_count, gemini_text, launch_cost
+                if prompt_stdin is not None:
+                    # Prompt delivery is under the deadline too: a CLI that
+                    # never reads stdin must not hang us past it.
+                    assert proc.stdin
+                    proc.stdin.write(prompt_stdin)
+                    await proc.stdin.drain()
+                    proc.stdin.close()
+                    await proc.stdin.wait_closed()
                 async for raw in proc.stdout:
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line:
@@ -482,7 +496,7 @@ async def run_agent(
                                 result.session_id = sid
                         elif mtype == "result":
                             result.result_message = msg
-                            ledger.record_cost(msg.get("total_cost_usd"))
+                            launch_cost = float(msg.get("total_cost_usd") or 0.0)
                             subtype = str(msg.get("subtype") or "")
                             # Agents with run_in_background bash tasks keep the
                             # CLI stream alive past the result message; break on
@@ -494,6 +508,11 @@ async def run_agent(
                                 # same limit, so record it and stop — partial
                                 # output (tags emitted before the limit) is kept.
                                 result.stop_reason = subtype
+                                if subtype != "error_max_turns":
+                                    # Out of money is not a clean finish: a
+                                    # re-attack or grader must not read it as
+                                    # "attacked and found nothing".
+                                    result.error = f"budget exhausted: {subtype}"
                                 return result
                             if msg.get("is_error"):
                                 detail = str(msg.get("result"))
@@ -504,10 +523,28 @@ async def run_agent(
                             return result
                 return None
 
+            async def _attempt() -> AgentResult:
+                """One CLI launch, start to process exit, under one deadline."""
+                final = await _consume()
+                if final is not None:
+                    return final
+                # Stream ended without a result message — wait for exit too:
+                # a CLI that closes stdout but never exits must not hang us.
+                rc = await proc.wait()
+                if stderr_task:
+                    try:
+                        await asyncio.wait_for(stderr_task, 5)
+                    except asyncio.TimeoutError:
+                        pass
+                raise RuntimeError(
+                    f"CLI exited rc={rc} without result: "
+                    f"{bytes(stderr_tail).decode(errors='replace')[-2000:]}"
+                )
+
             try:
                 remaining = deadline_at - time.monotonic()
                 try:
-                    final = await asyncio.wait_for(_consume(), timeout=max(remaining, 0.001))
+                    final = await asyncio.wait_for(_attempt(), timeout=max(remaining, 0.001))
                 except asyncio.TimeoutError:
                     await _stop(proc, container)
                     result.error = (f"deadline exceeded after "
@@ -515,18 +552,11 @@ async def run_agent(
                     events.emit("agent.deadline", agent_label,
                                 elapsed_s=time.monotonic() - started)
                     return result
-                if final is not None:
-                    await _stop(proc)
-                    return final
-
-                # Stream ended without a result message — process died.
-                rc = await proc.wait()
-                if stderr_task:
-                    await asyncio.wait_for(stderr_task, 5)
-                raise RuntimeError(
-                    f"CLI exited rc={rc} without result: "
-                    f"{bytes(stderr_tail).decode(errors='replace')[-2000:]}"
-                )
+                # An error stop (budget, no-tools violation, fatal CLI error)
+                # must also kill the in-container CLI: terminating the host-side
+                # exec client alone leaves it running and spending.
+                await _stop(proc, container if final.error else None)
+                return final
 
             except Exception as e:
                 await _stop(proc)
@@ -555,6 +585,8 @@ async def run_agent(
                             error=str(e)[:300])
                 await asyncio.sleep(backoff)
     finally:
+        if holding:
+            ledger.end_launch(held_cap, launch_cost)
         events.emit("agent.end", agent_label,
                     elapsed_s=time.monotonic() - started,
                     error=result.error, stop_reason=result.stop_reason,

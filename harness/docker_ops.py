@@ -245,7 +245,7 @@ def _bounded_exec(argv, *, max_output, timeout, text, stdin=None):
     if text:
         out = out.decode("utf-8", errors="replace")
         err = err.decode("utf-8", errors="replace")
-    return proc.returncode, out, err, truncated[0]
+    return proc.returncode, out, err, any(truncated)
 
 
 def write_file(container: str, path: str, content: bytes) -> None:
@@ -305,6 +305,10 @@ def tag(source: str, destination: str) -> str:
     return destination
 
 
+class OutputTruncated(RuntimeError):
+    """Captured output hit the cap and the caller needs the whole stream."""
+
+
 def kill_all(container: str) -> None:
     """SIGKILL every process in a container (PID 1 is immune by design).
 
@@ -327,6 +331,7 @@ def exec_sh(
     timeout: int | None = None,
     max_output: int = EXEC_MAX_OUTPUT_BYTES,
     env: dict[str, str] | None = None,
+    fail_on_truncate: bool = False,
 ) -> tuple[int, str, str]:
     """Run a shell command inside a container and return (rc, stdout, stderr).
 
@@ -335,6 +340,10 @@ def exec_sh(
     bytes per stream (a marker line is appended when clipped). On timeout the
     in-container processes are killed and subprocess.TimeoutExpired is raised —
     caller decides whether that's a tier failure or a hard error.
+
+    ``fail_on_truncate`` raises ``OutputTruncated`` instead of returning clipped
+    output. Use it for *absence* checks ("the canary/ASAN marker is not in the
+    output"): a leak past the cap would otherwise read as a clean run.
 
     ``env`` sets per-exec variables (used for the web grader's one-shot
     canary; never pass secrets here — they appear in host argv).
@@ -349,7 +358,9 @@ def exec_sh(
         kill_all(container)
         raise
     if clipped:
-        out += f"\n[stdout truncated at {max_output} bytes]\n"
+        if fail_on_truncate:
+            raise OutputTruncated(f"output exceeded {max_output} bytes")
+        out += f"\n[output truncated at {max_output} bytes per stream]\n"
     return rc, out, err
 
 

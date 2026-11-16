@@ -80,7 +80,12 @@ receive `sk-ant-ivcd-gateway-placeholder` and
 - forwards only `/v1/messages*` and `/v1/models*` to one fixed HTTPS upstream;
 - is reachable only on the `--internal` network.
 
-A stolen placeholder is useless off-box. `bin/vp-sandboxed` prints a warning
+- requires a random per-setup client token (the container's "API key"), so other
+  containers on the default bridge, where the sidecar also listens, cannot spend
+  the key; the token is not an Anthropic credential;
+- preserves the upstream base path and streams SSE events as they arrive.
+
+A stolen client token is useless off-box. `bin/vp-sandboxed` prints a warning
 when the gateway is not active. **Not covered:** Bedrock, Vertex, Codex, Gemini
 and Ollama credentials are still passed into agent containers; for those, use a
 dedicated invocation-only principal with a short TTL and a spend alarm.
@@ -89,7 +94,10 @@ dedicated invocation-only principal with a short TTL and a spend alarm.
 
 Turns bound one agent, not a batch. `--max-batch-usd`, `--max-batch-tokens`,
 `--max-agent-usd` and `--agent-deadline-s` (env equivalents in `CLAUDE.md`)
-stop agents once the shared ledger or the per-agent deadline is hit. A
+stop agents once the shared ledger or the per-agent deadline is hit. Dollar
+ceilings are enforced live by reserving a per-agent share (so
+`--max-batch-usd` needs `--max-agent-usd`); ceilings are supported only on the
+Claude backend and other backends are refused rather than left unenforced. A
 `budget.exceeded` event is written to `events.jsonl`. Max-turn / max-budget
 results are terminal and are never resumed.
 

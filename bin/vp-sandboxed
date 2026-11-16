@@ -83,6 +83,11 @@ export VULN_PIPELINE_EGRESS_PROXY="http://${proxy_ip}:3128"
 if "$ENGINE" inspect "$PROXY_NAME" --format '{{range .Config.Env}}{{println .}}{{end}}' \
         | grep -q '^VP_GATEWAY_UPSTREAM=.'; then
     export VULN_PIPELINE_CREDENTIAL_GATEWAY="http://${proxy_ip}:8080"
+    VULN_PIPELINE_GATEWAY_TOKEN=$("$ENGINE" inspect "$PROXY_NAME" --format \
+        '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^VP_GATEWAY_CLIENT_TOKEN=//p')
+    [ -n "$VULN_PIPELINE_GATEWAY_TOKEN" ] \
+        || { echo "error: gateway proxy has no client token; re-run scripts/setup_sandbox.sh" >&2; exit 1; }
+    export VULN_PIPELINE_GATEWAY_TOKEN
 elif [ "$backend" = "claude" ] && [ -z "${CLAUDE_CODE_USE_BEDROCK:-}${CLAUDE_CODE_USE_VERTEX:-}" ] \
         && [ -n "${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     echo "warning: credential gateway not active; the model key will be placed in agent containers." >&2

@@ -116,15 +116,26 @@ def test_gateway_only_allows_model_paths():
     assert proxy.GATEWAY_PATHS == ("/v1/messages", "/v1/models")
 
 
+CLIENT = "sk-ant-ivcd-" + "c" * 48
+
 # ── credential gateway swap ──────────────────────────────────────────────────
 
-def test_gateway_replaces_real_key_with_placeholder(monkeypatch):
+def test_gateway_replaces_real_key_with_client_token(monkeypatch):
     monkeypatch.setenv(sandbox.RUNTIME_ENV, "runsc")
     monkeypatch.setenv(sandbox.GATEWAY_ENV, "http://10.0.0.2:8080")
+    monkeypatch.setenv(sandbox.GATEWAY_TOKEN_ENV, "sk-ant-ivcd-" + "t" * 48)
     env = sandbox.container_env({"ANTHROPIC_API_KEY": "sk-ant-REAL"})
     assert "sk-ant-REAL" not in json.dumps(env)
-    assert env["ANTHROPIC_API_KEY"] == sandbox.GATEWAY_PLACEHOLDER
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-ivcd-" + "t" * 48
     assert env["ANTHROPIC_BASE_URL"] == "http://10.0.0.2:8080"
+
+
+def test_gateway_without_client_token_refuses(monkeypatch):
+    monkeypatch.setenv(sandbox.RUNTIME_ENV, "runsc")
+    monkeypatch.setenv(sandbox.GATEWAY_ENV, "http://10.0.0.2:8080")
+    monkeypatch.delenv(sandbox.GATEWAY_TOKEN_ENV, raising=False)
+    with pytest.raises(RuntimeError, match="GATEWAY_TOKEN"):
+        sandbox.container_env({"ANTHROPIC_API_KEY": "sk-ant-REAL"})
 
 
 def test_no_gateway_passes_key_through(monkeypatch):
@@ -255,12 +266,49 @@ def test_ledger_dedupes_message_ids_and_trips_ceiling():
     budget.configure()
 
 
-def test_ledger_usd_ceiling():
-    led = budget.configure(max_usd=1.0)
-    led.record_cost(0.6)
-    assert led.exceeded() is None
-    led.record_cost(0.5)
-    assert "spend" in led.exceeded()
+def test_batch_usd_requires_per_agent_cap():
+    with pytest.raises(ValueError, match="max-agent-usd"):
+        budget.configure(max_usd=1.0)
+    budget.configure()
+
+
+def test_live_dollar_ceiling_via_reservation():
+    led = budget.configure(max_usd=1.0, max_agent_usd=0.6)
+    a = led.begin_launch()
+    assert a == 0.6
+    b = led.begin_launch()          # only 0.4 left while `a` is in flight
+    assert b == pytest.approx(0.4)
+    with pytest.raises(budget.BudgetExhausted):
+        led.begin_launch()          # nothing left to reserve: live enforcement
+    led.end_launch(a, 0.5)
+    led.end_launch(b, 0.4)
+    assert led.usd == pytest.approx(0.9) and led.reserved == pytest.approx(0)
+    assert led.begin_launch() == pytest.approx(0.1)
+    budget.configure()
+
+
+def test_launch_cap_is_forwarded_to_cli(monkeypatch):
+    budget.configure(max_usd=1.0, max_agent_usd=0.7)
+    seen = []
+    msgs = [{"type": "system", "subtype": "init", "session_id": "s"},
+            {"type": "result", "subtype": "success", "is_error": False,
+             "total_cost_usd": 0.5}]
+
+    async def fake_exec(*a, **k):
+        return _FakeProc(msgs)
+
+    def fake_cmd(*a, **k):
+        seen.append(k["max_budget_usd"])
+        return ["x"]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(agent.agent_backends, "selected", lambda *_: "claude")
+    monkeypatch.setattr(agent.agent_backends, "command", fake_cmd)
+    monkeypatch.setattr(agent.docker_ops, "kill_all", lambda c: None)
+    asyncio.run(agent.run_agent("p", container="c", max_turns=1, model="m"))
+    assert seen == [0.7]
+    led = budget.ledger()
+    assert led.usd == pytest.approx(0.5) and led.reserved == pytest.approx(0)
     budget.configure()
 
 
@@ -319,7 +367,12 @@ def test_max_turns_result_is_terminal_not_retried(monkeypatch, subtype):
     monkeypatch.setattr(agent.agent_backends, "command", lambda *a, **k: ["x"])
     monkeypatch.setattr(agent.docker_ops, "kill_all", lambda c: None)
     res = asyncio.run(agent.run_agent("p", container="c", max_turns=1, model="m"))
-    assert len(launches) == 1 and res.error is None and res.stop_reason == subtype
+    assert len(launches) == 1 and res.stop_reason == subtype
+    if subtype == "error_max_budget_usd":
+        # Out of money must fail re-attack/grading, not read as a clean run.
+        assert res.error and "budget exhausted" in res.error
+    else:
+        assert res.error is None
 
 
 def test_fatal_auth_error_is_not_retried(monkeypatch):
@@ -434,16 +487,17 @@ def test_gateway_injects_credential_and_blocks_other_paths(monkeypatch):
     from http.server import ThreadingHTTPServer
 
     proxy = _load_proxy()
-    monkeypatch.setattr(proxy, "GATEWAY_UPSTREAM", "https://api.example.test")
+    monkeypatch.setattr(proxy, "GATEWAY_UPSTREAM", "https://api.example.test/anthropic")
     monkeypatch.setattr(proxy, "GATEWAY_API_KEY", "REAL-KEY")
     monkeypatch.setattr(proxy, "GATEWAY_OAUTH_TOKEN", "")
+    monkeypatch.setattr(proxy, "GATEWAY_CLIENT_TOKEN", CLIENT)
     seen = {}
 
     class FakeResp:
         status = 200
         def __init__(self): self._d = [b'{"ok":true}', b""]
         def getheaders(self): return [("Content-Type", "application/json")]
-        def read(self, n): return self._d.pop(0)
+        def read1(self, n): return self._d.pop(0)
 
     class FakeConn:
         def __init__(self, host, port, timeout=None): seen["host"] = host
@@ -457,18 +511,24 @@ def test_gateway_injects_credential_and_blocks_other_paths(monkeypatch):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
-        c.request("POST", "/v1/messages", body=b"{}",
-                  headers={"x-api-key": "sk-ant-ivcd-gateway-placeholder",
-                           "Authorization": "Bearer stolen", "Content-Length": "2"})
+        c.request("POST", "/v1/messages?beta=true", body=b"{}",
+                  headers={"x-api-key": CLIENT, "Content-Length": "2"})
         r = c.getresponse()
         assert r.status == 200 and r.read() == b'{"ok":true}'
         assert seen["headers"]["x-api-key"] == "REAL-KEY"
         assert "Authorization" not in seen["headers"]
-        assert "placeholder" not in json.dumps(seen["headers"])
+        assert CLIENT not in json.dumps(seen["headers"])
+        # upstream base path is preserved
+        assert seen["path"] == "/anthropic/v1/messages?beta=true"
 
         c2 = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
-        c2.request("GET", "/v1/organizations/keys")
+        c2.request("GET", "/v1/organizations/keys", headers={"x-api-key": CLIENT})
         assert c2.getresponse().status == 403
+        # no / wrong client token: another container on the bridge gets nothing
+        for hdrs in ({}, {"x-api-key": "sk-ant-wrong"}, {"Authorization": "Bearer nope"}):
+            c3 = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+            c3.request("POST", "/v1/messages", body=b"{}", headers=hdrs)
+            assert c3.getresponse().status == 401
     finally:
         srv.shutdown()
 
@@ -481,6 +541,7 @@ def test_gateway_drops_unlisted_and_sanitizes_response_headers(monkeypatch):
     proxy = _load_proxy()
     monkeypatch.setattr(proxy, "GATEWAY_UPSTREAM", "https://api.example.test")
     monkeypatch.setattr(proxy, "GATEWAY_API_KEY", "K")
+    monkeypatch.setattr(proxy, "GATEWAY_CLIENT_TOKEN", CLIENT)
 
     class FakeResp:
         status = 200
@@ -489,7 +550,7 @@ def test_gateway_drops_unlisted_and_sanitizes_response_headers(monkeypatch):
             return [("Content-Type", "text/plain"),
                     ("X-Evil", "a"), ("Set-Cookie", "s=1"),
                     ("anthropic-ratelimit", "ok\r\nInjected: 1")]
-        def read(self, n): return self._d.pop(0)
+        def read1(self, n): return self._d.pop(0)
 
     class FakeConn:
         def __init__(self, *a, **k): pass
@@ -502,10 +563,195 @@ def test_gateway_drops_unlisted_and_sanitizes_response_headers(monkeypatch):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
-        c.request("POST", "/v1/messages", body=b"{}")
+        c.request("POST", "/v1/messages", body=b"{}", headers={"x-api-key": CLIENT})
         r = c.getresponse()
         h = {k.lower(): v for k, v in r.getheaders()}
         assert "x-evil" not in h and "set-cookie" not in h
         assert "injected" not in h and h["anthropic-ratelimit"] == "okInjected: 1"
     finally:
+        srv.shutdown()
+
+
+def test_token_budget_stop_kills_in_container_agent(monkeypatch):
+    budget.configure(max_tokens=10)
+    msgs = [{"type": "system", "subtype": "init", "session_id": "s"},
+            {"type": "assistant", "message": {"id": "m1", "usage": {"output_tokens": 99},
+                                              "content": [{"type": "text", "text": "x"}]}}]
+
+    async def fake_exec(*a, **k):
+        return _FakeProc(msgs)
+
+    killed = []
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(agent.agent_backends, "selected", lambda *_: "claude")
+    monkeypatch.setattr(agent.agent_backends, "command", lambda *a, **k: ["x"])
+    monkeypatch.setattr(agent.docker_ops, "kill_all", lambda c: killed.append(c))
+    res = asyncio.run(agent.run_agent("p", container="ctr", max_turns=1, model="m"))
+    assert "budget exceeded" in res.error and killed == ["ctr"]
+    budget.configure()
+
+
+def test_deadline_covers_stdin_and_process_exit(monkeypatch):
+    budget.configure()
+
+    class StuckStdin(_FakeProc):
+        class _W(_FakeProc._W):
+            async def drain(self):
+                await asyncio.sleep(60)
+
+    class NoExit(_FakeProc):
+        async def wait(self):
+            if self.returncode is None:   # hangs until terminated/killed
+                await asyncio.sleep(60)
+            return self.returncode
+
+    killed = []
+    monkeypatch.setattr(agent.agent_backends, "selected", lambda *_: "claude")
+    monkeypatch.setattr(agent.agent_backends, "command", lambda *a, **k: ["x"])
+    monkeypatch.setattr(agent.docker_ops, "kill_all", lambda c: killed.append(c))
+
+    async def stuck_stdin(*a, **k):
+        p = StuckStdin([])
+        p.stdin = StuckStdin._W()
+        return p
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", stuck_stdin)
+    res = asyncio.run(agent.run_agent("p", container="c", max_turns=1, model="m",
+                                      deadline_s=0.3))
+    assert "deadline exceeded" in res.error
+
+    async def no_exit(*a, **k):
+        return NoExit([{"type": "system", "subtype": "init", "session_id": "s"}])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", no_exit)
+    res = asyncio.run(agent.run_agent("p", container="c", max_turns=1, model="m",
+                                      deadline_s=0.3))
+    assert "deadline exceeded" in res.error and killed
+
+
+def test_non_claude_backend_with_ceiling_is_refused():
+    from harness import cli
+    import argparse
+    args = argparse.Namespace(max_batch_usd=None, max_batch_tokens=1000,
+                              max_agent_usd=None, agent_deadline_s=None,
+                              agent_backend="codex")
+    with pytest.raises(ValueError, match="claude backend"):
+        cli._apply_limits(args)
+    args.agent_backend = "claude"
+    cli._apply_limits(args)
+    budget.configure()
+
+
+# ── truncation fails absence checks closed ───────────────────────────────────
+
+def test_exec_sh_fail_on_truncate_and_stderr_truncation(monkeypatch):
+    monkeypatch.setattr(docker_ops, "command", _fake_exec(None))
+    with pytest.raises(docker_ops.OutputTruncated):
+        docker_ops.exec_sh("c", "yes | head -c 5000", max_output=100, fail_on_truncate=True)
+    # stderr alone also counts
+    with pytest.raises(docker_ops.OutputTruncated):
+        docker_ops.exec_sh("c", "head -c 5000 /dev/zero 1>&2",
+                           max_output=100, fail_on_truncate=True)
+    rc, out, err = docker_ops.exec_sh("c", "echo ok", max_output=100, fail_on_truncate=True)
+    assert out.strip() == "ok"
+
+
+def test_web_t1_fails_closed_when_output_truncated():
+    from harness.patch_grade import _t1_passes
+    # rc=-1 is what grade_patch records when OutputTruncated is raised
+    assert not _t1_passes(-1, "", "replay output exceeded capture limit", "python_web", "c")
+
+
+# ── signal-free manifest ─────────────────────────────────────────────────────
+
+def test_run_find_accepts_manifest_without_detection_signal(monkeypatch):
+    from contextlib import contextmanager
+    from harness import find
+    from harness.config import TargetConfig
+
+    manifest = {"replay_command": "/opt/vp/replay /tmp/m.json", "security_impact": "x",
+                "evidence": {"kind": "http", "requests": [{"path": "/a"}],
+                             "responses": [{"status": 200}]}}
+    target = TargetConfig(
+        name="w", dockerfile_dir="/t", image_tag="w:1", github_url="u", commit="c",
+        binary_path="/opt/vp/replay", source_root="/work/app", profile="python_web",
+        replay_command="/opt/vp/replay")
+
+    @contextmanager
+    def fake_container(*a, **k):
+        yield "c"
+
+    async def fake_agent(**kw):
+        r = agent.AgentResult()
+        r.messages.append({"type": "assistant", "message": {"content": [{"type": "text", "text":
+            "<replay_manifest_path>/tmp/m.json</replay_manifest_path><finding_type>idor</finding_type>"}]}})
+        return r
+
+    monkeypatch.setattr(find.sandbox, "agent_container", fake_container)
+    monkeypatch.setattr(find, "run_agent", fake_agent)
+    monkeypatch.setattr(find.docker_ops, "read_file", lambda c, p: json.dumps(manifest).encode())
+    crash, _, _ = asyncio.run(find.run_find(target, model="m"))
+    assert crash is not None and crash.detection_signal is None
+
+
+# ── agbom reflects actual credential handling ────────────────────────────────
+
+def test_agbom_posture_reflects_real_transformation(monkeypatch):
+    from harness import agbom
+    monkeypatch.setenv(sandbox.RUNTIME_ENV, "runsc")
+    monkeypatch.setenv(sandbox.GATEWAY_ENV, "http://10.0.0.2:8080")
+    monkeypatch.setenv(sandbox.GATEWAY_TOKEN_ENV, "sk-ant-ivcd-" + "t" * 48)
+    swapped = agbom._credential_posture({"ANTHROPIC_API_KEY": "sk-ant-REAL"})
+    assert swapped["in_agent_container"] == "placeholder-only" and swapped["gateway_applied"]
+    # A gateway URL exists, but Bedrock credentials pass through unchanged.
+    passthru = agbom._credential_posture(
+        {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_ACCESS_KEY_ID": "A", "AWS_SECRET_ACCESS_KEY": "S"})
+    assert passthru["in_agent_container"] == "real"
+    assert set(passthru["real_credentials_in_agent_container"]) == {
+        "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
+    assert not passthru["gateway_applied"]
+
+
+def test_gateway_streams_events_as_they_arrive(monkeypatch):
+    """A small SSE event must reach the client before upstream finishes."""
+    import http.client
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    proxy = _load_proxy()
+    monkeypatch.setattr(proxy, "GATEWAY_UPSTREAM", "https://api.example.test")
+    monkeypatch.setattr(proxy, "GATEWAY_API_KEY", "K")
+    monkeypatch.setattr(proxy, "GATEWAY_CLIENT_TOKEN", CLIENT)
+    release = threading.Event()
+
+    class FakeResp:
+        status = 200
+        def __init__(self): self._n = 0
+        def getheaders(self): return [("Content-Type", "text/event-stream")]
+        def read1(self, n):
+            self._n += 1
+            if self._n == 1:
+                return b"data: hello\n\n"      # tiny event, far below 8 KiB
+            release.wait(10)                      # upstream stays open
+            return b""
+        def read(self, n):                        # old behaviour would block here
+            release.wait(10)
+            return b""
+
+    class FakeConn:
+        def __init__(self, *a, **k): pass
+        def request(self, *a, **k): pass
+        def getresponse(self): return FakeResp()
+        def close(self): pass
+
+    monkeypatch.setattr(proxy.http.client, "HTTPSConnection", FakeConn)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Gateway)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+        c.request("POST", "/v1/messages", body=b"{}", headers={"x-api-key": CLIENT})
+        r = c.getresponse()
+        assert r.read(len(b"data: hello\n\n")) == b"data: hello\n\n"  # before release
+    finally:
+        release.set()
         srv.shutdown()

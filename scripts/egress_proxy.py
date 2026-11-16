@@ -22,6 +22,7 @@ code is worthless (and the CONNECT allowlist no longer needs the API host).
 from __future__ import annotations
 
 import os
+import hmac
 import http.client
 import re
 import select
@@ -43,6 +44,10 @@ GATEWAY_UPSTREAM = os.environ.get("VP_GATEWAY_UPSTREAM", "").strip()
 GATEWAY_PORT = int(os.environ.get("VP_GATEWAY_PORT") or 8080)
 GATEWAY_API_KEY = os.environ.get("VP_GATEWAY_API_KEY", "")
 GATEWAY_OAUTH_TOKEN = os.environ.get("VP_GATEWAY_OAUTH_TOKEN", "")
+# Shared secret agent containers must present (as their "API key"). The
+# listener is reachable on every network the sidecar joins, including the
+# default bridge, so without this any container there could spend the real key.
+GATEWAY_CLIENT_TOKEN = os.environ.get("VP_GATEWAY_CLIENT_TOKEN", "")
 GATEWAY_PATHS = ("/v1/messages", "/v1/models")
 GATEWAY_MAX_BODY = 32 * 1024 * 1024
 _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -127,7 +132,17 @@ class Gateway(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
 
+    def _authorized(self) -> bool:
+        supplied = (self.headers.get("x-api-key")
+                    or (self.headers.get("Authorization") or "").removeprefix("Bearer "))
+        return bool(GATEWAY_CLIENT_TOKEN) and hmac.compare_digest(
+            supplied.encode(), GATEWAY_CLIENT_TOKEN.encode())
+
     def _handle(self):
+        if not self._authorized():
+            sys.stderr.write(f"[gateway 401] {self.client_address[0]}\n")
+            self.send_error(401, "gateway: client token required")
+            return
         path = self.path.split("?", 1)[0]
         if not any(path == p or path.startswith(p + "/") for p in GATEWAY_PATHS):
             sys.stderr.write(f"[gateway DENY] {self.client_address[0]} {self.command} {path}\n")
@@ -152,7 +167,9 @@ class Gateway(BaseHTTPRequestHandler):
         try:
             conn = http.client.HTTPSConnection(
                 up.hostname, up.port or 443, timeout=600)
-            conn.request(self.command, self.path, body=body, headers=headers)
+            # Keep the upstream base path (e.g. https://host/anthropic).
+            conn.request(self.command, up.path.rstrip("/") + self.path,
+                         body=body, headers=headers)
             resp = conn.getresponse()
         except (OSError, http.client.HTTPException) as e:
             self.send_error(502, f"gateway upstream failed: {type(e).__name__}")
@@ -164,12 +181,18 @@ class Gateway(BaseHTTPRequestHandler):
             # never be able to split the response we send to the container.
             name = k.lower()
             if name in _RESP_HEADERS or name.startswith("anthropic-"):
-                self.send_header(_CTL.sub("", k), _CTL.sub("", v))
+                safe_k = k.replace("\r", "").replace("\n", "")
+                safe_v = v.replace("\r", "").replace("\n", "")
+                if _CTL.search(safe_k) or _CTL.search(safe_v):
+                    continue  # any other control character: drop the header
+                self.send_header(safe_k, safe_v)
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
         try:
-            while chunk := resp.read(8192):
+            # read1 returns whatever is available now; read(n) would block
+            # until n bytes or EOF and stall live SSE events.
+            while chunk := resp.read1(8192):
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except OSError:
@@ -188,6 +211,8 @@ def main() -> None:
     if GATEWAY_UPSTREAM:
         if not (GATEWAY_API_KEY or GATEWAY_OAUTH_TOKEN):
             sys.exit("VP_GATEWAY_UPSTREAM set but no VP_GATEWAY_API_KEY/OAUTH_TOKEN")
+        if len(GATEWAY_CLIENT_TOKEN) < 32:
+            sys.exit("VP_GATEWAY_CLIENT_TOKEN (>=32 chars) is required for the gateway")
         if urlparse(GATEWAY_UPSTREAM).scheme != "https":
             sys.exit("VP_GATEWAY_UPSTREAM must be an https:// URL")
         threading.Thread(

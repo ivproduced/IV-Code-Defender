@@ -23,6 +23,7 @@ import uuid
 from dataclasses import replace
 
 from . import docker_ops, sandbox
+from .docker_ops import OutputTruncated
 from .agent import parse_xml_tag, run_agent
 from .artifacts import CrashArtifact, PatchVerdict
 from .asan import project_frames
@@ -155,7 +156,11 @@ async def grade_patch(
                 rc, out, err = await asyncio.to_thread(
                     docker_ops.exec_sh, container, adapted, timeout=600,
                     env={CANARY_ENV: canary} if canary else None,
+                    fail_on_truncate=True,
                 )
+            except OutputTruncated:
+                # T1 is an absence check; unseen output cannot prove absence.
+                rc, out, err = -1, "", "replay output exceeded capture limit"
             except subprocess.TimeoutExpired:
                 rc, out, err = (
                     -1,

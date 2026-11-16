@@ -124,7 +124,11 @@ if [ -n "$GW_KEY_VAR" ]; then
     case "$GW_UPSTREAM" in https://*) ;; *) die "ANTHROPIC_BASE_URL must be https:// for the credential gateway" ;; esac
     # -e NAME (no value) copies from this shell's env so the secret never
     # appears in argv / `ps`.
-    GW_ARGS=(-e VP_GATEWAY_UPSTREAM="$GW_UPSTREAM" -e "$GW_KEY_VAR")
+    # Random shared secret the agent containers present to the gateway. It is
+    # not an Anthropic credential; it only stops other containers on the
+    # default bridge (where the sidecar also listens) from spending the key.
+    export VP_GATEWAY_CLIENT_TOKEN="sk-ant-ivcd-$(openssl rand -hex 24)"
+    GW_ARGS=(-e VP_GATEWAY_UPSTREAM="$GW_UPSTREAM" -e "$GW_KEY_VAR" -e VP_GATEWAY_CLIENT_TOKEN)
     echo "  credential gateway: on (upstream $GW_UPSTREAM; key held by proxy only)"
 else
     warn "credential gateway off: model credentials will be passed into agent containers"
@@ -133,7 +137,7 @@ docker run -d --name "$PROXY_NAME" --restart=unless-stopped \
     -e VP_EGRESS_ALLOW="$ALLOW" \
     ${GW_ARGS[@]+"${GW_ARGS[@]}"} \
     --network bridge "$PROXY_TAG" >/dev/null
-unset VP_GATEWAY_API_KEY VP_GATEWAY_OAUTH_TOKEN
+unset VP_GATEWAY_API_KEY VP_GATEWAY_OAUTH_TOKEN VP_GATEWAY_CLIENT_TOKEN
 docker network connect "$NET" "$PROXY_NAME"
 proxy_ip=$(docker inspect "$PROXY_NAME" --format \
     '{{(index .NetworkSettings.Networks "'$NET'").IPAddress}}')
