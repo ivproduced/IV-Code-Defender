@@ -63,6 +63,51 @@ start outside that sandbox unless you explicitly pass `--dangerously-no-sandbox`
 > For a full treatment of isolation options, credential proxying, and filesystem 
 > hardening, see Anthropic's guide on [securely deploying AI agents](https://platform.claude.com/docs/en/agent-sdk/secure-deployment).
 
+## Model credentials: the credential gateway
+
+The largest residual risk in the sandbox is the model credential living in the
+same container that runs attacker-influenced target code. The egress allowlist
+cannot tell your API tenant from an attacker's, so a key stolen from the
+container can leave through `api.anthropic.com` (OWASP LLM02 / ASI03).
+
+For the Claude backend with API-key or OAuth auth, `scripts/setup_sandbox.sh`
+(default on; `VP_CREDENTIAL_GATEWAY=0` to opt out) starts the egress-proxy
+sidecar with the real credential in *its* environment only. Agent containers
+receive `sk-ant-ivcd-gateway-placeholder` and
+`ANTHROPIC_BASE_URL=http://<proxy>:8080`. The gateway:
+
+- strips whatever credential header the container sent and injects the real one;
+- forwards only `/v1/messages*` and `/v1/models*` to one fixed HTTPS upstream;
+- is reachable only on the `--internal` network.
+
+- requires a random per-setup client token (the container's "API key"), so other
+  containers on the default bridge, where the sidecar also listens, cannot spend
+  the key; the token is not an Anthropic credential;
+- preserves the upstream base path and streams SSE events as they arrive.
+
+A stolen client token is useless off-box. `bin/vp-sandboxed` prints a warning
+when the gateway is not active. **Not covered:** Bedrock, Vertex, Codex, Gemini
+and Ollama credentials are still passed into agent containers; for those, use a
+dedicated invocation-only principal with a short TTL and a spend alarm.
+
+## Spend and runtime ceilings
+
+Turns bound one agent, not a batch. `--max-batch-usd`, `--max-batch-tokens`,
+`--max-agent-usd` and `--agent-deadline-s` (env equivalents in `CLAUDE.md`)
+stop agents once the shared ledger or the per-agent deadline is hit. Dollar
+ceilings are enforced live by reserving a per-agent share (so
+`--max-batch-usd` needs `--max-agent-usd`); ceilings are supported only on the
+Claude backend and other backends are refused rather than left unenforced. A
+`budget.exceeded` event is written to `events.jsonl`. Max-turn / max-budget
+results are terminal and are never resumed.
+
+## Audit trail
+
+Each batch writes `events.jsonl` (structured, OpenTelemetry/OCSF-shaped) and
+`agbom.json` (Agent Bill of Materials: model, CLI version, tools, image IDs,
+network/credential posture, limits, prompt hashes; never secret values) to its
+results directory.
+
 ## Separating setup and attack phases
 
 The general pattern (described in the

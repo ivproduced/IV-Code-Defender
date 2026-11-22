@@ -10,16 +10,28 @@ the API and nothing else. Denied attempts are logged — useful signal if an
 agent tries to phone home. The orchestrator stays on the trusted host.
 
 Run as a sidecar container dual-homed on vp-internal and the default bridge.
+
+Optional credential gateway (``VP_GATEWAY_UPSTREAM``): a second listener that
+accepts plain HTTP from agent containers, strips whatever credential header
+they send, injects the real key held only in *this* container's environment,
+and forwards to a single fixed upstream. Agent containers then hold only a
+placeholder token, so a key exfiltrated from the container that runs target
+code is worthless (and the CONNECT allowlist no longer needs the API host).
 """
 
 from __future__ import annotations
 
 import os
+import hmac
+import http.client
 import re
 import select
 import socket
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 ALLOW = {
     h.strip().lower()
@@ -27,6 +39,25 @@ ALLOW = {
     if h.strip()
 }
 PORT = int(os.environ.get("VP_EGRESS_PORT") or 3128)
+
+GATEWAY_UPSTREAM = os.environ.get("VP_GATEWAY_UPSTREAM", "").strip()
+GATEWAY_PORT = int(os.environ.get("VP_GATEWAY_PORT") or 8080)
+GATEWAY_API_KEY = os.environ.get("VP_GATEWAY_API_KEY", "")
+GATEWAY_OAUTH_TOKEN = os.environ.get("VP_GATEWAY_OAUTH_TOKEN", "")
+# Shared secret agent containers must present (as their "API key"). The
+# listener is reachable on every network the sidecar joins, including the
+# default bridge, so without this any container there could spend the real key.
+GATEWAY_CLIENT_TOKEN = os.environ.get("VP_GATEWAY_CLIENT_TOKEN", "")
+GATEWAY_PATHS = ("/v1/messages", "/v1/models")
+GATEWAY_MAX_BODY = 32 * 1024 * 1024
+_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+        "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+        "x-api-key", "authorization"}
+_RESP_HEADERS = {"content-type", "content-encoding", "cache-control", "retry-after",
+                 "request-id", "x-request-id"}
+_CTL = re.compile(r"[\x00-\x1f\x7f]")
+SOCKET_TIMEOUT = 60
+MAX_TUNNEL_SECONDS = int(os.environ.get("VP_EGRESS_MAX_TUNNEL_S") or 4 * 3600)
 
 _HOST_RE = re.compile(r"^[a-z0-9.-]+:\d+$")
 
@@ -62,11 +93,18 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _pump(a: socket.socket, b: socket.socket) -> None:
-        a.setblocking(False)
-        b.setblocking(False)
+        """Relay bytes both ways.
+
+        Sockets stay in blocking mode with a timeout: ``sendall`` on a
+        non-blocking socket raises BlockingIOError (an OSError) as soon as the
+        peer's buffer fills, silently tearing down large streamed responses.
+        select() only gates reads; writes block (bounded by SOCKET_TIMEOUT)."""
+        a.settimeout(SOCKET_TIMEOUT)
+        b.settimeout(SOCKET_TIMEOUT)
+        deadline = time.monotonic() + MAX_TUNNEL_SECONDS
         try:
-            while True:
-                r, _, _ = select.select([a, b], [], [], 60)
+            while time.monotonic() < deadline:
+                r, _, _ = select.select([a, b], [], [], SOCKET_TIMEOUT)
                 if not r:
                     return
                 for src in r:
@@ -88,8 +126,100 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+
+class Gateway(BaseHTTPRequestHandler):
+    """Credential-injecting reverse proxy to one fixed HTTPS upstream."""
+
+    protocol_version = "HTTP/1.1"
+
+    def _authorized(self) -> bool:
+        supplied = (self.headers.get("x-api-key")
+                    or (self.headers.get("Authorization") or "").removeprefix("Bearer "))
+        return bool(GATEWAY_CLIENT_TOKEN) and hmac.compare_digest(
+            supplied.encode(), GATEWAY_CLIENT_TOKEN.encode())
+
+    def _handle(self):
+        if not self._authorized():
+            sys.stderr.write(f"[gateway 401] {self.client_address[0]}\n")
+            self.send_error(401, "gateway: client token required")
+            return
+        path = self.path.split("?", 1)[0]
+        if not any(path == p or path.startswith(p + "/") for p in GATEWAY_PATHS):
+            sys.stderr.write(f"[gateway DENY] {self.client_address[0]} {self.command} {path}\n")
+            self.send_error(403, "gateway: path not allowed")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > GATEWAY_MAX_BODY:
+            self.send_error(413, "gateway: bad or oversized body")
+            return
+        body = self.rfile.read(length) if length else None
+        up = urlparse(GATEWAY_UPSTREAM)
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in _HOP}
+        if GATEWAY_API_KEY:
+            headers["x-api-key"] = GATEWAY_API_KEY
+        if GATEWAY_OAUTH_TOKEN:
+            headers["Authorization"] = f"Bearer {GATEWAY_OAUTH_TOKEN}"
+        headers["Host"] = up.netloc
+        headers["Accept-Encoding"] = "identity"
+        try:
+            conn = http.client.HTTPSConnection(
+                up.hostname, up.port or 443, timeout=600)
+            # Keep the upstream base path (e.g. https://host/anthropic).
+            conn.request(self.command, up.path.rstrip("/") + self.path,
+                         body=body, headers=headers)
+            resp = conn.getresponse()
+        except (OSError, http.client.HTTPException) as e:
+            self.send_error(502, f"gateway upstream failed: {type(e).__name__}")
+            return
+        # Close-delimited response: simplest correct way to stream SSE.
+        self.send_response(resp.status)
+        for k, v in resp.getheaders():
+            # Allowlist + CR/LF/control stripping: upstream header text must
+            # never be able to split the response we send to the container.
+            name = k.lower()
+            if name in _RESP_HEADERS or name.startswith("anthropic-"):
+                safe_k = k.replace("\r", "").replace("\n", "")
+                safe_v = v.replace("\r", "").replace("\n", "")
+                if _CTL.search(safe_k) or _CTL.search(safe_v):
+                    continue  # any other control character: drop the header
+                self.send_header(safe_k, safe_v)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            # read1 returns whatever is available now; read(n) would block
+            # until n bytes or EOF and stall live SSE events.
+            while chunk := resp.read1(8192):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    do_GET = do_POST = _handle  # noqa: N815
+
+    def log_message(self, format, *args):  # noqa: A002 — base sig
+        pass
+
+
 def main() -> None:
     sys.stderr.write(f"[egress] listening on :{PORT}, allow={sorted(ALLOW)}\n")
+    if GATEWAY_UPSTREAM:
+        if not (GATEWAY_API_KEY or GATEWAY_OAUTH_TOKEN):
+            sys.exit("VP_GATEWAY_UPSTREAM set but no VP_GATEWAY_API_KEY/OAUTH_TOKEN")
+        if len(GATEWAY_CLIENT_TOKEN) < 32:
+            sys.exit("VP_GATEWAY_CLIENT_TOKEN (>=32 chars) is required for the gateway")
+        if urlparse(GATEWAY_UPSTREAM).scheme != "https":
+            sys.exit("VP_GATEWAY_UPSTREAM must be an https:// URL")
+        threading.Thread(
+            target=ThreadingHTTPServer(("", GATEWAY_PORT), Gateway).serve_forever,
+            daemon=True,
+        ).start()
+        sys.stderr.write(f"[gateway] :{GATEWAY_PORT} -> {GATEWAY_UPSTREAM}\n")
     ThreadingHTTPServer(("", PORT), Handler).serve_forever()
 
 

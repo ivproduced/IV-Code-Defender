@@ -24,16 +24,24 @@ retain `binary_path` for compatibility (use the replay executable) and require:
 ```yaml
 profile: python_web
 replay_command: /work/replay             # absolute, simple command; no shell syntax
-detection_signal: VULNERABILITY_DETECTED # marker printed only while the issue remains
 ```
+
+**Canary contract.** The grader runs every replay with a fresh random secret in
+`IVCD_CANARY` (a different value for each of the three replays, and for the
+patch-verification replay). The replay entrypoint must plant that value in
+data an attacker should not be able to read (another user's record, an
+admin-only field, a server-side secret) before replaying the manifest. A
+finding passes criterion 3 only if the exact canary appears in the replay
+output 3/3; a patch passes T1 only if it no longer does. The old static
+`detection_signal` key is accepted but ignored for grading — a fixed string is
+forgeable by any replay that echoes manifest text.
 
 The `replay_command` script owns its complete lifecycle: it starts the local
 service/browser, replays `/tmp/replay.json`, captures evidence, and stops its
 children. Docker is primary; Podman remains supported by the existing sandbox
 setup. A web find must save a UTF-8 JSON replay manifest with its exact
 self-contained command, structured HTTP `requests`/`responses` or browser
-`steps`/`observations`, a deterministic target-owned detection signal, and
-concrete security impact. That manifest—not scanner output—crosses into the
+`steps`/`observations`, and concrete security impact. That manifest—not scanner output—crosses into the
 pristine grader, which replays it three times and rejects test-only paths.
 
 Optional fields:

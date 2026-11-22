@@ -52,7 +52,7 @@ class TargetConfig:
     source_root: str      # path inside the built container
     profile: str = "cpp_asan"
     replay_command: str | None = None  # self-contained web replay entrypoint
-    detection_signal: str | None = None  # marker absent once a web fix is effective
+    detection_signal: str | None = None  # legacy, descriptive only (grading uses a per-replay canary)
     focus_areas: list[str] = field(default_factory=list)
     known_bugs: list[str] = field(default_factory=list)
     attack_surface: str | None = None
@@ -83,9 +83,12 @@ class TargetConfig:
         if profile != "cpp_asan":
             if not replay_command:
                 raise ValueError(f"profile {profile!r} requires replay_command")
-            if not isinstance(detection_signal, str) or not detection_signal.strip():
-                raise ValueError(f"profile {profile!r} requires detection_signal")
-            if len(detection_signal) > 256 or any(c in detection_signal for c in "\r\n\0"):
+            # Legacy/descriptive only; verdicts use the grader's random canary.
+            if detection_signal is not None and (
+                not isinstance(detection_signal, str)
+                or len(detection_signal) > 256
+                or any(c in detection_signal for c in "\r\n\0")
+            ):
                 raise ValueError(f"Unsafe detection_signal: {detection_signal!r}")
             replay_executable = PurePosixPath(
                 _safe_replay_command(replay_command).split(" ", 1)[0]

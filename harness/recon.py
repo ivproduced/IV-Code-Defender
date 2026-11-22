@@ -14,9 +14,12 @@ from . import sandbox
 from .agent import run_agent, parse_xml_tag, AgentResult
 from .config import TargetConfig
 from .prompts.recon_prompt import build_recon_prompt
+from .prompts.untrusted import clean_text
 
 
 RECON_MAX_TURNS = 100
+MAX_FOCUS_AREAS = 15
+MAX_FOCUS_AREA_CHARS = 400
 
 
 async def run_recon(
@@ -57,5 +60,8 @@ async def run_recon(
         if not raw:
             return [], result
 
-        areas = [line.strip() for line in raw.splitlines() if line.strip()]
+        # Recon output derives from attacker-controlled source comments and is
+        # later fed to find agents; bound it (count, length, control chars).
+        areas = [clean_text(line.strip(), MAX_FOCUS_AREA_CHARS)
+                 for line in raw.splitlines() if line.strip()][:MAX_FOCUS_AREAS]
         return areas, result

@@ -6,5 +6,5 @@ commit: <pinned-commit>
 binary_path: /opt/vp/replay
 source_root: /work/app
 replay_command: /opt/vp/replay
-detection_signal: VULNERABILITY_DETECTED
+# detection_signal is legacy/descriptive; grading uses the per-replay IVCD_CANARY
 attack_surface: Authenticated JSON API behind the application's normal router.

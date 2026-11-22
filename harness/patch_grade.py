@@ -23,12 +23,13 @@ import uuid
 from dataclasses import replace
 
 from . import docker_ops, sandbox
+from .docker_ops import OutputTruncated
 from .agent import parse_xml_tag, run_agent
 from .artifacts import CrashArtifact, PatchVerdict
 from .asan import project_frames
 from .config import TargetConfig
 from .find import run_find
-from .profiles import is_web, trusted_reproduction_command
+from .profiles import CANARY_ENV, is_web, new_canary, trusted_reproduction_command
 from .prompts.patch_prompt import build_style_judge_prompt
 
 REATTACK_MAX_TURNS = 50
@@ -150,10 +151,16 @@ async def grade_patch(
                 docker_ops.write_file, container, workspace_artifact, crash.poc_bytes
             )
             adapted = trusted_reproduction_command(target, crash, workspace_artifact)
+            canary = new_canary() if is_web(target.profile) else None
             try:
                 rc, out, err = await asyncio.to_thread(
-                    docker_ops.exec_sh, container, adapted, timeout=600
+                    docker_ops.exec_sh, container, adapted, timeout=600,
+                    env={CANARY_ENV: canary} if canary else None,
+                    fail_on_truncate=True,
                 )
+            except OutputTruncated:
+                # T1 is an absence check; unseen output cannot prove absence.
+                rc, out, err = -1, "", "replay output exceeded capture limit"
             except subprocess.TimeoutExpired:
                 rc, out, err = (
                     -1,
@@ -161,7 +168,7 @@ async def grade_patch(
                     "timed out after 600s (hang — likely a botched loop bound)",
                 )
             timings["t1"] = time.time() - s
-            t1 = _t1_passes(rc, out, err, target.profile, target.detection_signal)
+            t1 = _t1_passes(rc, out, err, target.profile, canary)
             if not t1:
                 evidence["t1"] = _clip(f"[poc] rc={rc}\n{err or out}")
                 return _verdict(t0, t1, t2, re_clean, t3, evidence, timings)
@@ -252,10 +259,12 @@ def _t1_passes(
     stdout: str,
     stderr: str,
     profile: str = "cpp_asan",
-    detection_signal: str | None = None,
+    canary: str | None = None,
 ) -> bool:
     if is_web(profile):
-        return rc == 0 and bool(detection_signal) and detection_signal not in (stdout + stderr)
+        # A fixed target must not leak the grader-planted canary; an empty
+        # canary would make "not in output" vacuously true, so require one.
+        return rc == 0 and bool(canary) and canary not in (stdout + stderr)
     return rc == 0 and "AddressSanitizer:" not in (stdout + stderr)
 
 
