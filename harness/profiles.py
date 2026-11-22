@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from .config import PROFILES, TargetConfig
+from .config import PROFILES, PYEXEC_PROFILE, WEB_PROFILE_NAMES, TargetConfig
 from .prompts.find_prompt import build_find_prompt as build_cpp_find_prompt
 from .prompts.grade_prompt import build_grade_prompt as build_cpp_grade_prompt
 from .prompts.report_prompt import build_report_prompt as build_cpp_report_prompt
@@ -25,9 +25,10 @@ from .prompts.report_grader_prompt import (
 )
 from .prompts.judge_prompt import build_judge_prompt as build_cpp_judge_prompt
 from .prompts.patch_prompt import build_patch_prompt as build_cpp_patch_prompt
+from .prompts import pyexec_prompts
 from .prompts.untrusted import clean_text, make_nonce, sanitize_untrusted, untrusted_block
 
-WEB_PROFILES = frozenset(PROFILES - {"cpp_asan"})
+WEB_PROFILES = WEB_PROFILE_NAMES
 _SAFE_REPLAY_COMMAND = re.compile(r"^/[A-Za-z0-9._/-]+(?: [A-Za-z0-9._/:=-]+)*$")
 WEB_REPORT_SECTIONS = ("vector", "authorization", "impact", "chaining", "constraints")
 
@@ -43,6 +44,15 @@ def new_canary() -> str:
 
 def is_web(profile: str) -> bool:
     return profile in WEB_PROFILES
+
+
+def is_pyexec(profile: str) -> bool:
+    return profile == PYEXEC_PROFILE
+
+
+def new_event_token() -> str:
+    """Fresh per-replay monitor token (32 hex chars). Never shown to an agent."""
+    return secrets.token_hex(16)
 
 
 def trusted_reproduction_command(target: TargetConfig, crash, artifact_path: str) -> str:
@@ -138,6 +148,9 @@ def build_find_prompt(
     found_bugs_path: str | None,
     accept_dos: bool,
 ) -> str:
+    if is_pyexec(target.profile):
+        return pyexec_prompts.build_find_prompt(
+            target, focus_area, known_bugs, found_bugs_path, accept_dos)
     if not is_web(target.profile):
         return build_cpp_find_prompt(
             github_url=target.github_url, commit=target.commit,
@@ -185,6 +198,8 @@ Save the manifest before emitting exactly:
 
 
 def build_grade_prompt(target: TargetConfig, crash, adapted_command: str, workspace_artifact: str) -> str:
+    if is_pyexec(target.profile):
+        return pyexec_prompts.build_grade_prompt(target, crash, adapted_command, workspace_artifact)
     if not is_web(target.profile):
         return build_cpp_grade_prompt(
             image_tag=target.image_tag, reproduction_command=crash.reproduction_command,
@@ -217,6 +232,8 @@ Emit `<criterion_1>` through `<criterion_5>`, `<overall>PASS|FAIL</overall>`,
 
 def build_report_prompt(target: TargetConfig, crash, adapted_command: str,
                         upstream_log: str | None, crash_file: str | None) -> str:
+    if is_pyexec(target.profile):
+        return pyexec_prompts.build_report_prompt(target, crash, adapted_command, upstream_log)
     if not is_web(target.profile):
         return build_cpp_report_prompt(
             github_url=target.github_url, commit=target.commit, source_root=target.source_root,
@@ -241,6 +258,8 @@ Static scanner output cannot be used as evidence.
 
 
 def build_report_grader_prompt(profile: str, report_text: str) -> str:
+    if is_pyexec(profile):
+        return pyexec_prompts.build_report_grader_prompt(report_text)
     if not is_web(profile):
         return build_cpp_report_grader_prompt(report_text)
     tags = "\n".join(f"<score_{section}>0|1|2</score_{section}>" for section in WEB_REPORT_SECTIONS)
@@ -262,6 +281,9 @@ def build_judge_prompt(
     profile: str, evidence_excerpt: str, dup_check: str, grade_status: str,
     grade_score: float, poc_size: int, manifest_entries: list[dict],
 ) -> str:
+    if is_pyexec(profile):
+        return pyexec_prompts.build_judge_prompt(
+            evidence_excerpt, dup_check, grade_status, grade_score, poc_size, manifest_entries)
     if not is_web(profile):
         return build_cpp_judge_prompt(
             asan_excerpt=evidence_excerpt, dup_check=dup_check,
@@ -289,6 +311,8 @@ is materially clearer.
 
 def build_patch_prompt(target: TargetConfig, reproduction_command: str, crash,
                        report_text: str | None, retry_evidence: tuple[str, str] | None) -> str:
+    if is_pyexec(target.profile):
+        raise ValueError("patching is not supported for python_exec in this release")
     if not is_web(target.profile):
         return build_cpp_patch_prompt(
             source_root=target.source_root, binary_path=target.binary_path,
@@ -321,6 +345,8 @@ class Profile:
 def get_profile(name: str) -> Profile:
     if name not in PROFILES:
         raise ValueError(f"Unsupported profile {name!r}")
+    if is_pyexec(name):
+        return Profile(name, pyexec_prompts.REPORT_SECTIONS)
     return Profile(name, WEB_REPORT_SECTIONS if is_web(name) else (
         "primitive", "reachability", "heap_layout", "escalation_path", "constraints",
     ))

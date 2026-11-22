@@ -40,6 +40,24 @@ specific bug class) and union the results. A given pipeline encodes a
 set of assumptions (explicitly or implicitly) and adding variants with
 different assumptions will catch different things.
 
+## Worked example: a runtime-monitor profile for Python
+
+`python_exec` is the in-repo example of porting the detection mechanism
+without ASAN: the signal comes from an in-process monitor instead of a
+sanitizer, and the verdict from machine rules instead of a model. If you are
+adding another interpreted language, copy its shape:
+
+1. a monitor shipped into the image outside `source_root`, keyed by a
+   per-replay random token the target cannot read from its environment
+   (`harness/monitor/sitecustomize.py`);
+2. proof rules that run on the host against observations the grader collected
+   (`harness/pyexec.py`, wired in `harness/grade.py:_machine_verdict`);
+3. a config validator that fails closed (`harness/config.py:_pyexec_policy`);
+4. prompts that teach the contract and fence target text
+   (`harness/prompts/pyexec_prompts.py`, dispatched from `harness/profiles.py`);
+5. a canary target and a docker-gated end-to-end test (`targets/pycanary`,
+   `tests/test_pyexec_e2e.py`).
+
 ## Where the C/C++ specifics live, concretely
 
 1. Find and grade (`harness/prompts/find_prompt.py` and `harness/prompts/grade_prompt.py`):
